@@ -1,0 +1,28 @@
+# Arduino IDE
+*.o
+*.a
+*.so
+build/
+*.elf
+*.hex
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Dependencies (if using platformio)
+.pio/
+.venv/
+lib/
+
+# Compilation
+*.bin
+*.map
