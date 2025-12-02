@@ -28,6 +28,12 @@
 #include <esp_task_wdt.h>
 #include <map>
 
+// BLE MIDI Transport
+#include <BLEMIDI_Transport.h>
+#include <hardware/BLEMIDI_ESP32.h>
+#include <MIDI.h>
+BLEMIDI_CREATE_DEFAULT_INSTANCE();
+
 #define DEBUG_VERBOSE 0
 
 //========================================================================
@@ -75,6 +81,16 @@ const uint8_t PAL_BLUE = 8;
 const uint8_t PAL_ORANGE = 9;
 
 //========================================================================
+// BLE MIDI CONFIGURATION
+//========================================================================
+bool bleMidiConnected = false;
+uint8_t midiChannel = 1;           // MIDI channel (1-16)
+
+// Per-encoder velocity (0-127), controlled by encoder rotation when switch is OFF
+// Initialized to 127 (encoder at 0 position = full velocity)
+uint8_t encoderVelocity[7] = { 127, 127, 127, 127, 127, 127, 127 };
+
+//========================================================================
 // DISPLAY CONFIGURATION CONSTANTS
 //========================================================================
 const uint16_t DISPLAY_WIDTH = 320;
@@ -97,7 +113,7 @@ const int8_t ENCODER_MIN_VALUE = -60;
 //========================================================================
 // TIMING & UPDATE CONFIGURATION
 //========================================================================
-const unsigned long UPDATE_INTERVAL = 10;     // 100fps for smooth updates
+const unsigned long UPDATE_INTERVAL = 50;     // 100fps for smooth updates
 const unsigned long STATUS_INTERVAL = 5000;   // 5 seconds
 const unsigned long BUTTON_HOLD_TIME = 1000;  // 1 second hold time
 
@@ -292,6 +308,52 @@ struct Keys {
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
     keysSpriteBuffer.setTextColor(PAL_WHITE);
     keysSpriteBuffer.printf(this->intervalS.c_str());
+
+    // Draw velocity bar if this key is in scale
+    if (this->inScale) {
+      // Find which encoder index (0-6) this scale note corresponds to
+      int encoderIdx = -1;
+      for (int j = 0; j < 7; j++) {
+        int8_t scaleNote = scalemanager.getScaleNote(j);
+        if (scaleNote >= 12) scaleNote -= 12;
+        if (scaleNote == keyNo) {
+          encoderIdx = j;
+          break;
+        }
+      }
+      
+      if (encoderIdx >= 0 && encoderIdx < 7) {
+        // Bar dimensions: fixed base height 85, max height 35 (within keys sprite)
+        int barX = this->x + w / 2 - 2;  // Center horizontally (5px wide)
+        int barBase = 85;                  // Fixed base for white keys
+        // Offset bar base upward for black keys (same offset as key positioning: 10px)
+        if (!whiteKeys[keyNo]) {
+          barBase -= 10;  // Black keys offset
+        }
+        int maxBarHeight = 35;             // Fixed max height
+        int barTop = barBase - maxBarHeight;
+        
+        // Map velocity (0-127) to bar height
+        // CW turn increases height from 0 to max, ACW decreases from max to 0
+        uint8_t velocity = encoderVelocity[encoderIdx];
+        int barHeight = (velocity * maxBarHeight) / 127;
+        if (barHeight < 0) barHeight = 0;
+        if (barHeight > maxBarHeight) barHeight = maxBarHeight;
+        
+        // Determine bar color based on button state of corresponding encoder
+        uint8_t barColor = PAL_MEDGREY;  // Default: mid grey
+        if (enc[encoderIdx].isActive) {
+          barColor = PAL_GREEN;          // Hold: green (active/locked)
+        } else if (enc[encoderIdx].shortPress) {
+          barColor = PAL_ORANGE;         // Short press: orange
+        }
+        
+        // Draw bar from bottom up (base to base-height)
+        int barY = barBase - barHeight;
+        keysSpriteBuffer.setColor(barColor);
+        keysSpriteBuffer.fillRect(barX, barY, 5, barHeight, barColor);
+      }
+    }
   }
 };
 
@@ -409,6 +471,44 @@ bool updateButtonState(uint8_t buttonIndex, bool isPressed, unsigned long curren
 bool isValueStable(int32_t newValue, uint8_t encoderIndex);
 
 //========================================================================
+// BLE MIDI HELPER FUNCTIONS
+//========================================================================
+// Calculate MIDI note for encoder button (encoders 0-6 = scale notes)
+// MIDI note 60 = C4, so formula is: note + ((octave + 1) * 12)
+uint8_t getEncoderMidiNote(uint8_t encoderIndex) {
+  if (encoderIndex > 6) return 0;  // Encoder 7 doesn't send notes
+  
+  int8_t scaleNote = scalemanager.getScaleNote(encoderIndex);
+  if (scaleNote >= 12) scaleNote -= 12;
+  
+  // MIDI standard: C4 = 60, so octave 4 -> (4+1)*12 = 60 for C
+  int midiNote = scaleNote + ((currentOctave + 1) * 12);
+  if (midiNote < 0) midiNote = 0;
+  if (midiNote > 127) midiNote = 127;
+  
+  return (uint8_t)midiNote;
+}
+
+// Get velocity for encoder 0-6
+uint8_t getEncoderVelocity(uint8_t encoderIndex) {
+  if (encoderIndex > 6) return 100;
+  return encoderVelocity[encoderIndex];
+}
+
+//========================================================================
+// BLE MIDI CALLBACKS
+//========================================================================
+void OnMidiConnected() {
+  bleMidiConnected = true;
+  Serial.println("[BLE MIDI] Connected");
+}
+
+void OnMidiDisconnected() {
+  bleMidiConnected = false;
+  Serial.println("[BLE MIDI] Disconnected");
+}
+
+//========================================================================
 // SETUP
 //========================================================================
 void setup() {
@@ -486,7 +586,7 @@ void setup() {
     return;
   }
 
-  // Initialize encoder display states
+  // Initialize encoder display states and reset encoder values to 0
   for (int i = 0; i < NUM_ENCODERS; i++) {
     enc[i].r = 16;
     enc[i].x = 16 + i * 38;
@@ -496,6 +596,7 @@ void setup() {
     enc[i].colourIdle = 3;
     enc[i].colourActive = 7;
     sensor.setLEDColor(i, 0x000000);  // Turn off LEDs
+    sensor.resetCounter(i);           // Reset encoder to 0
     delay(10);
   }
 
@@ -536,6 +637,14 @@ void setup() {
 
   // Calculate and display initial scale intervals
   setScaleIntervals();
+
+  // Initialize BLE MIDI
+  Serial.println("Initializing BLE MIDI...");
+  MIDI.begin(MIDI_CHANNEL_OMNI);
+  delay(100);
+  BLEMIDI.setHandleConnected(OnMidiConnected);
+  BLEMIDI.setHandleDisconnected(OnMidiDisconnected);
+  Serial.println("BLE MIDI initialized");
 
   // Clear all buffer sprites
   infoSpriteBuffer.fillSprite(0);
@@ -582,6 +691,9 @@ void loop() {
   lastUpdate = millis();
 
   M5.update();
+
+  // Keep BLE MIDI stack alive
+  MIDI.read();
 
   // ==================================================================
   // READ SWITCH STATE
@@ -664,8 +776,16 @@ void loop() {
       encoderChanged = true;
       lastEncoderValues[i] = stableValue;
 
-      // Encoders 6, 7, 8 (indices 5, 6, 7) control musical parameters
-      if (i == 5 || i == 6 || i == 7) {
+      // Switch OFF: encoders 0-6 rotation controls velocity (0-127 mapped to 1 full turn)
+      // Switch ON: encoders 5-7 control musical parameters, 0-4 do nothing (yet)
+      if (!currentSwitchState && i <= 6) {
+        // Map encoder value to velocity: CW increases, ACW decreases
+        // 60 clicks per turn: vel = (encoder_value * 127) / 60
+        int vel = (stableValue * 127) / 60;
+        if (vel < 0) vel = 0;
+        if (vel > 127) vel = 127;
+        encoderVelocity[i] = (uint8_t)vel;
+      } else if (currentSwitchState && (i == 5 || i == 6 || i == 7)) {
         Serial.print("Processing parameter encoder ");
         Serial.println(i);
 
@@ -855,7 +975,7 @@ void loop() {
             encoder8LastValue = stableValue;
           }
         }
-      }
+      }  // end switch ON encoder 5-7 handling
     }
 
     // ==================================================================
@@ -864,8 +984,17 @@ void loop() {
 
     // Button press detected
     if (buttonPressed && !buttonWasPressed[i]) {
+      // Only encoders 0-6 send MIDI notes (switch OFF mode)
+      // Switch ON: buttons don't send MIDI (encoders 5-7 control params)
+      bool sendsMidi = !currentSwitchState && i <= 6;
+      
       if (enc[i].isActive && waitingForNextPress[i]) {
-        // Pressing active encoder deactivates it
+        // Pressing active encoder deactivates it - send NoteOff
+        if (bleMidiConnected && sendsMidi) {
+          uint8_t midiNote = getEncoderMidiNote(i);
+          MIDI.sendNoteOff(midiNote, 0, midiChannel);
+          Serial.printf("[BLE MIDI] NoteOff (deactivate): %d, ch: %d\n", midiNote, midiChannel);
+        }
         Serial.print("Encoder ");
         Serial.print(i);
         Serial.println(" button pressed - deactivating");
@@ -875,7 +1004,13 @@ void loop() {
         sensor.setLEDColor(i, LED_COLOR_OFF);
         encoderChanged = true;
       } else if (!enc[i].isActive) {
-        // New press on inactive encoder - start timing for hold
+        // New press on inactive encoder - send NoteOn, start timing for hold
+        if (bleMidiConnected && sendsMidi) {
+          uint8_t midiNote = getEncoderMidiNote(i);
+          uint8_t velocity = getEncoderVelocity(i);
+          MIDI.sendNoteOn(midiNote, velocity, midiChannel);
+          Serial.printf("[BLE MIDI] NoteOn: %d, vel: %d, ch: %d\n", midiNote, velocity, midiChannel);
+        }
         buttonPressStartTime[i] = millis();
         buttonHoldProcessed[i] = false;
         enc[i].shortPress = true;  // Show orange indicator
@@ -888,7 +1023,15 @@ void loop() {
     }
     // Button released
     else if (!buttonPressed && buttonWasPressed[i]) {
+      bool sendsMidi = !currentSwitchState && i <= 6;
+      
+      // Only send NoteOff on release if it was a short press (not held/active)
       if (!enc[i].isActive && !buttonHoldProcessed[i]) {
+        if (bleMidiConnected && sendsMidi) {
+          uint8_t midiNote = getEncoderMidiNote(i);
+          MIDI.sendNoteOff(midiNote, 0, midiChannel);
+          Serial.printf("[BLE MIDI] NoteOff (release): %d, ch: %d\n", midiNote, midiChannel);
+        }
         // Short press released - turn off orange indicator
         enc[i].shortPress = false;
         sensor.setLEDColor(i, LED_COLOR_OFF);
