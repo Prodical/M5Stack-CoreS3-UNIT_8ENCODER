@@ -66,3 +66,46 @@ State of Play - 2025-12-02 23:12 UTC
 - Compiling successfully
 - All features tested and working
 - Ready for feature integration
+
+=== DEVELOPMENT ROADMAP ===
+
+Immediate/High Priority:
+1. Encoder 0-4 functionality in Switch ON mode
+   - Currently reserved for future use
+   - Could control CC values, reverb/effects, volume, etc.
+   - Would expand musical expressiveness beyond scale notes
+
+2. Encoder 7 in Switch OFF mode
+   - Currently reserved
+   - Could control MIDI channel selection
+   - Or octave transpose (shift all notes up/down)
+   - Or CC modulation depth
+
+3. Scale note preview/indication on display
+   - Visual highlight which scale notes are currently playable
+   - Show octave being played
+   - Display active encoder for MIDI feedback
+
+Medium Priority:
+4. MIDI CC output - Separate from note messages
+   - Use rotation data to send CC messages
+   - Could be tied to encoders 0-4 in Switch ON mode
+   - Useful for DAW parameter control
+
+5. Chord/arpeggiator mode
+   - Multiple encoder buttons held simultaneously = chord
+   - Or encoder rotation triggers arpeggio patterns
+
+6. Persistence - Save settings to NVS
+   - Remember last scale/octave/root on power cycle
+   - Store user presets
+
+Polish/Quality:
+7. Display improvements
+   - Show current MIDI note number when button pressed
+   - Display velocity value numerically
+   - Real-time BLE connection indicator
+
+8. Performance optimization
+   - Profile memory usage (spare RAM available)
+   - Reduce I2C communication overhead if needed
