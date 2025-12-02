@@ -28,6 +28,8 @@
 #include <esp_task_wdt.h>
 #include <map>
 
+#define DEBUG_VERBOSE 0
+
 //========================================================================
 // DISPLAY & GRAPHICS OBJECTS
 //========================================================================
@@ -60,6 +62,18 @@ const uint32_t LED_COLOR_OFF = 0x000000;
 const uint32_t LED_COLOR_GREEN = 0x00FF00;
 const uint32_t LED_COLOR_ORANGE = 0xFF8000;
 
+// Palette index constants (for 4-bit color sprites)
+const uint8_t PAL_TRANSPARENT = 0;
+const uint8_t PAL_WHITE = 1;
+const uint8_t PAL_BLACK = 2;
+const uint8_t PAL_DARKGREY = 3;
+const uint8_t PAL_MEDGREY = 4;
+const uint8_t PAL_LIGHTGREY = 5;
+const uint8_t PAL_RED = 6;
+const uint8_t PAL_GREEN = 7;
+const uint8_t PAL_BLUE = 8;
+const uint8_t PAL_ORANGE = 9;
+
 //========================================================================
 // DISPLAY CONFIGURATION CONSTANTS
 //========================================================================
@@ -79,11 +93,6 @@ const uint8_t NUM_KEYS = 12;
 const int8_t ENCODER_MAX_VALUE = 60;
 const int8_t ENCODER_MIN_VALUE = -60;
 
-// Encoder state tracking arrays
-int32_t encoderValue[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-int32_t encoderValueLast[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-uint8_t btn_status[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-bool switch_status = false;
 
 //========================================================================
 // TIMING & UPDATE CONFIGURATION
@@ -104,12 +113,7 @@ const uint16_t I2C_ERROR_DELAY = 1000;  // ms
 //========================================================================
 ScaleManager scalemanager;
 
-const int8_t FUNDAMENTAL_DEFAULT = 60;
-const int8_t OCTAVE_DEFAULT = 4;
-const int8_t SCALE_DEFAULT = 0;
-
 // Scale state variables
-int8_t fundamentalDefault = 60;
 int8_t fundamental = 60;
 int8_t fundamentalLast = 60;
 int8_t octaveDefault = 4;
@@ -118,8 +122,8 @@ int8_t octaveLast = 4;
 int8_t octaveDif = 0;
 int8_t notesDif = 0;
 int8_t scaleNo = 0;
-int8_t scaleNoteNo[7] = {0, 0, 0, 0, 0, 0, 0};
-int8_t scaleIntervals[7] = {0, 0, 0, 0, 0, 0, 0};
+int8_t scaleNoteNo[7] = { 0, 0, 0, 0, 0, 0, 0 };
+int8_t scaleIntervals[7] = { 0, 0, 0, 0, 0, 0, 0 };
 bool updateScale = false;
 
 // Cached scale information for display
@@ -129,7 +133,7 @@ String cachedRootName = "";
 bool scaleCacheNeedsUpdate = true;
 
 // Interval formulas for each scale (displayed in info area)
-String intvlFormula[9] = {
+const char* const intvlFormula[9] = {
   "W-W-H-W-W-W-H", "W-H-W-W-H-W-W", "W-H-W-W-W-H-W", "W-H-W-W-H-3H-H",
   "W-H-W-W-W-H-W", "H-W-W-W-H-W-W", "W-W-W-H-W-W-H", "W-W-H-W-W-H-W", "H-W-W-H-W-W-W"
 };
@@ -141,60 +145,60 @@ const char noteNames[] PROGMEM = "C\0C#\0D\0D#\0E\0F\0F#\0G\0G#\0A\0A#\0B";
 // KEY IDENTIFICATION
 //========================================================================
 // Identifies white keys (1) vs black keys (0) in chromatic scale starting from C
-bool whiteKeys[12] = {1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1};
+const bool whiteKeys[12] = { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 };
 
 //========================================================================
 // ENCODER STRUCTURE & STATE
 //========================================================================
 // Defines visual representation and state of on-screen encoder widgets
 struct Encoders {
-  int x;                        // X position on screen
-  int y;                        // Y position on screen
-  int r;                        // Radius
-  int encValue;                 // Current encoder value
-  uint16_t colourIdle;          // Color when idle
-  uint16_t colourActive;        // Color when active
-  int8_t encId = -1;           // Encoder ID
-  bool encPressed = false;      // Button press state
-  bool isActive = false;        // Active/locked state
-  bool shortPress = false;      // Short press indicator state
-  String encNoteName = "";      // Note name (if applicable)
-  int8_t encScaleNoteNo;        // Scale note number
+  int x;                              // X position on screen
+  int y;                              // Y position on screen
+  int r;                              // Radius
+  int encValue;                       // Current encoder value
+  uint16_t colourIdle;                // Color when idle
+  uint16_t colourActive;              // Color when active
+  int8_t encId = -1;                  // Encoder ID
+  bool encPressed = false;            // Button press state
+  bool isActive = false;              // Active/locked state
+  bool shortPress = false;            // Short press indicator state
+  String encNoteName = "";            // Note name (if applicable)
+  int8_t encScaleNoteNo;              // Scale note number
   int8_t encOnceOnlySendNoteOn = 0;   // MIDI note on flag
   int8_t encOnceOnlySendNoteOff = 0;  // MIDI note off flag
   int8_t onceOnlyEncDraw = 0;         // Draw once flag
 
   // Clear encoder display area
   void clearEncs(int8_t encNo) {
-    encsSpriteBuffer.setColor(2);
-    encsSpriteBuffer.fillCircle(x - 2, y - 2, r + 4, 2);
+    encsSpriteBuffer.setColor(PAL_BLACK);
+    encsSpriteBuffer.fillCircle(x - 2, y - 2, r + 4, PAL_BLACK);
   }
 
   // Draw encoder with current state (idle/active/shortPress)
   void drawEncs(int8_t encNo) {
     // Determine circle color based on state
-    uint16_t circleColor;
+    uint8_t circleColor;
     if (this->isActive) {
-      circleColor = 7;  // Green for active/locked
+      circleColor = PAL_GREEN;     // Green for active/locked
     } else if (this->shortPress) {
-      circleColor = 9;  // Orange for short press
+      circleColor = PAL_ORANGE;    // Orange for short press
     } else {
-      circleColor = 3;  // Grey for idle
+      circleColor = PAL_DARKGREY;  // Grey for idle
     }
-    
+
     // Draw filled circle
     encsSpriteBuffer.setColor(circleColor);
     encsSpriteBuffer.fillCircle(x, y, r, circleColor);
 
     // Draw arc indicator starting from bottom (90 degrees)
-    uint16_t arcColor = (circleColor == 3) ? 1 : 2;  // White on grey, black otherwise
+    uint8_t arcColor = (circleColor == PAL_DARKGREY) ? PAL_WHITE : PAL_BLACK;
     encsSpriteBuffer.setColor(arcColor);
-    
+
     float startAngle = 90 + (this->encValue * 6) - 5;
     float endAngle = 90 + (this->encValue * 6) + 5;
-    int innerRadius = r - (arcColor == 2 ? 7 : 5);
-    int outerRadius = r - (arcColor == 2 ? 2 : 4);
-    
+    int innerRadius = r - (arcColor == PAL_BLACK ? 7 : 5);
+    int outerRadius = r - (arcColor == PAL_BLACK ? 2 : 4);
+
     encsSpriteBuffer.drawArc(x, y, innerRadius, outerRadius, startAngle, endAngle, arcColor);
   }
 };
@@ -214,21 +218,21 @@ struct Keys {
   int h;                        // Height
   uint16_t colourIdle;          // Idle color
   uint16_t colourActive;        // Active color
-  int8_t kId = -1;             // Key ID
-  int8_t keyNo = -1;           // Key number (0-11)
+  int8_t kId = -1;              // Key ID
+  int8_t keyNo = -1;            // Key number (0-11)
   String keyNoteName = "";      // Note name (C, C#, D, etc.)
   uint8_t onceOnlyKeyDraw = 0;  // Draw once flag
   bool inScale = false;         // Is this key in current scale?
   bool isFundamental = false;   // Is this the root note?
-  uint8_t octaveNo = -1;       // Octave number
+  uint8_t octaveNo = -1;        // Octave number
   String octaveS = "";          // Octave string for display
   uint8_t interval;             // Interval from previous scale note
   String intervalS;             // Interval string for display
 
   // Clear key display area
   void clearKeys(int8_t keyNo) {
-    keysSpriteBuffer.setColor(2);
-    keysSpriteBuffer.fillRoundRect(x - 1, y - 1, w + 2, h + 2, 2);
+    keysSpriteBuffer.setColor(PAL_BLACK);
+    keysSpriteBuffer.fillRoundRect(x - 1, y - 1, w + 2, h + 2, PAL_BLACK);
   }
 
   // Draw key with note name, octave, and interval
@@ -248,45 +252,45 @@ struct Keys {
     keysSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
     keysSpriteBuffer.setTextDatum(ML_DATUM);
     keysSpriteBuffer.setTextSize(0.45);
-    
+
     if (whiteKeys[keyNo]) {
       keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 35);
     } else {
       keysSpriteBuffer.setCursor(this->x + w / 2 - 8, this->y + h - 35);
     }
-    
+
     // Color: green for root, white for in-scale, grey for out-of-scale
-    if (this->inScale == true) {
-      if (this->isFundamental == true) {
-        keysSpriteBuffer.setTextColor(7);  // Green for root
+    if (this->inScale) {
+      if (this->isFundamental) {
+        keysSpriteBuffer.setTextColor(PAL_GREEN);     // Green for root
       } else {
-        keysSpriteBuffer.setTextColor(1);  // White for scale notes
+        keysSpriteBuffer.setTextColor(PAL_WHITE);     // White for scale notes
       }
     } else {
-      keysSpriteBuffer.setTextColor(3);    // Grey for non-scale notes
+      keysSpriteBuffer.setTextColor(PAL_DARKGREY);    // Grey for non-scale notes
     }
     keysSpriteBuffer.printf(this->keyNoteName.c_str());
 
     // Draw octave number
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 15);
-    
-    if (this->inScale == true) {
-      if (this->isFundamental == true) {
-        keysSpriteBuffer.setTextColor(7);
+
+    if (this->inScale) {
+      if (this->isFundamental) {
+        keysSpriteBuffer.setTextColor(PAL_GREEN);
       } else {
-        keysSpriteBuffer.setTextColor(1);
+        keysSpriteBuffer.setTextColor(PAL_WHITE);
       }
       keysSpriteBuffer.printf(this->octaveS.c_str());
     } else {
-      keysSpriteBuffer.setTextColor(3);
+      keysSpriteBuffer.setTextColor(PAL_DARKGREY);
       keysSpriteBuffer.printf("-");
     }
 
     // Draw interval number (semitones from previous scale note)
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
-    keysSpriteBuffer.setTextColor(1);
+    keysSpriteBuffer.setTextColor(PAL_WHITE);
     keysSpriteBuffer.printf(this->intervalS.c_str());
   }
 };
@@ -294,64 +298,21 @@ struct Keys {
 static constexpr uint8_t nosKeys = 12;
 static Keys key[nosKeys];
 
-//========================================================================
-// TEXT WIDTH CACHE (Optimization)
-//========================================================================
-// Caches text width calculations to avoid repeated expensive operations
-struct TextWidthCache {
-  std::map<String, int16_t> cache;
-
-  int16_t getWidth(const String& text) {
-    auto it = cache.find(text);
-    if (it != cache.end()) {
-      return it->second;
-    }
-    int16_t width = M5.Lcd.textWidth(text.c_str());
-    cache[text] = width;
-    return width;
-  }
-
-  void clear() {
-    cache.clear();
-  }
-};
-
-TextWidthCache textWidthCache;
-
-//========================================================================
-// BUTTON STATE MANAGEMENT
-//========================================================================
-// State machine for button press/hold/release detection
-enum ButtonState {
-  BUTTON_RELEASED = 0,
-  BUTTON_PRESSED = 1,
-  BUTTON_HOLDING = 2
-};
-
-struct ButtonStateManager {
-  ButtonState state = BUTTON_RELEASED;
-  unsigned long pressStartTime = 0;
-  bool processedHold = false;
-  bool waitingForNextPress = false;
-};
-
-ButtonStateManager buttonStates[8];
 
 //========================================================================
 // ENCODER TRACKING STATE
 //========================================================================
 // Global tracking variables for encoder state changes
 static int8_t currentOctave = 4;
-static int32_t lastEncoderValues[8] = {0};
-static int32_t encoderAccumulator[8] = {0};
-static bool encoderInitialized[8] = {false};
+static int32_t lastEncoderValues[8] = { 0 };
+static bool encoderInitialized[8] = { false };
 static int32_t encoder6LastValue = 0;
 static int32_t encoder7LastValue = 0;
 static int32_t encoder8LastValue = 0;
-static unsigned long buttonPressStartTime[8] = {0};
-static bool buttonHoldProcessed[8] = {false};
-static bool waitingForNextPress[8] = {false};
-static uint8_t lastButtonStates[8] = {1};
+static unsigned long buttonPressStartTime[8] = { 0 };
+static bool buttonHoldProcessed[8] = { false };
+static bool waitingForNextPress[8] = { false };
+static uint8_t lastButtonStates[8] = { 1 };
 static bool currentSwitchState = false;
 
 //========================================================================
@@ -360,46 +321,12 @@ static bool currentSwitchState = false;
 // Encoder debouncing to reduce jitter and false readings
 static const uint8_t DEBOUNCE_COUNT = 3;
 static const uint16_t DEBOUNCE_TIME = 5;  // milliseconds
-int32_t debounceValues[8][DEBOUNCE_COUNT] = {0};
-uint8_t debounceIndex[8] = {0};
-unsigned long lastDebounceTime[8] = {0};
-int32_t lastStableValue[8] = {0};
-bool valueChanged[8] = {false};
+int32_t debounceValues[8][DEBOUNCE_COUNT] = { 0 };
+uint8_t debounceIndex[8] = { 0 };
+unsigned long lastDebounceTime[8] = { 0 };
+int32_t lastStableValue[8] = { 0 };
+bool valueChanged[8] = { false };
 
-//========================================================================
-// SCALE CACHE STRUCTURE
-//========================================================================
-// Caches scale information to avoid repeated lookups
-struct ScaleCache {
-  int8_t scaleNoteNo[7];
-  int8_t scaleIntervals[7];
-  bool inScale[12];
-  bool isFundamental[12];
-  String scaleName;
-  String rootName;
-  int8_t fundamental;
-  int8_t scaleNo;
-  bool needsUpdate;
-
-  ScaleCache() : needsUpdate(true) {
-    for (int i = 0; i < 7; i++) {
-      scaleNoteNo[i] = 0;
-      scaleIntervals[i] = 0;
-    }
-    for (int i = 0; i < 12; i++) {
-      inScale[i] = false;
-      isFundamental[i] = false;
-    }
-    fundamental = 0;
-    scaleNo = 0;
-  }
-
-  void clear() {
-    needsUpdate = true;
-  }
-};
-
-ScaleCache scaleCache;
 
 //========================================================================
 // I2C MANAGER CLASS
@@ -414,32 +341,12 @@ private:
   static const uint8_t MAX_ERRORS = 10;
 
 public:
-  // Read encoder value with retry logic
+  // Read encoder value (no retry needed - I2C library handles errors)
   bool readEncoderValue(uint8_t encoderIndex, int32_t& value, uint8_t& buttonState) {
-    uint8_t retries = 0;
-
-    while (retries < MAX_RETRIES) {
-      try {
-        buttonState = sensor.getButtonStatus(encoderIndex);
-        value = sensor.getEncoderValue(encoderIndex);
-        errorCount = 0;  // Success - reset error count
-        return true;
-      } catch (...) {
-        retries++;
-        errorCount++;
-
-        if (retries >= MAX_RETRIES) {
-          Serial.print("Failed to read encoder ");
-          Serial.print(encoderIndex);
-          Serial.print(" after ");
-          Serial.print(MAX_RETRIES);
-          Serial.println(" attempts");
-          return false;
-        }
-        delay(RETRY_DELAY);
-      }
-    }
-    return false;
+    buttonState = sensor.getButtonStatus(encoderIndex);
+    value = sensor.getEncoderValue(encoderIndex);
+    errorCount = 0;  // Success - reset error count
+    return true;
   }
 
   // Attempt I2C bus recovery
@@ -474,89 +381,16 @@ public:
     return true;
   }
 
-  uint8_t getErrorCount() const { return errorCount; }
-  void resetErrorCount() { errorCount = 0; }
+  uint8_t getErrorCount() const {
+    return errorCount;
+  }
+  void resetErrorCount() {
+    errorCount = 0;
+  }
 };
 
 I2CManager i2cManager;
 
-//========================================================================
-// ENCODER DEBOUNCER CLASS
-//========================================================================
-// Reduces encoder jitter through multi-sample averaging
-class EncoderDebouncer {
-private:
-  static const uint8_t DEBOUNCE_SAMPLES = 5;
-  static const uint16_t DEBOUNCE_THRESHOLD = 2;
-
-  struct EncoderData {
-    int32_t samples[DEBOUNCE_SAMPLES];
-    uint8_t index = 0;
-    int32_t lastStableValue = 0;
-    bool initialized = false;
-  };
-
-  EncoderData encoders[8];
-
-public:
-  bool getStableValue(uint8_t encoderIndex, int32_t rawValue, int32_t& stableValue) {
-    if (encoderIndex >= 8) return false;
-
-    EncoderData& data = encoders[encoderIndex];
-
-    // Initialize on first read
-    if (!data.initialized) {
-      for (int i = 0; i < DEBOUNCE_SAMPLES; i++) {
-        data.samples[i] = rawValue;
-      }
-      data.lastStableValue = rawValue;
-      data.index = 0;
-      data.initialized = true;
-      stableValue = rawValue;
-      return true;
-    }
-
-    // Add new sample
-    data.samples[data.index] = rawValue;
-    data.index = (data.index + 1) % DEBOUNCE_SAMPLES;
-
-    // Check for consistent readings
-    int32_t consistentValue = checkConsistency(data.samples, rawValue);
-
-    if (consistentValue != data.lastStableValue) {
-      // Handle wrap-around at encoder limits
-      if (consistentValue >= ENCODER_MAX_VALUE) {
-        consistentValue = 0;
-      } else if (consistentValue <= ENCODER_MIN_VALUE) {
-        consistentValue = 0;
-      }
-
-      data.lastStableValue = consistentValue;
-      stableValue = consistentValue;
-      return true;
-    }
-
-    stableValue = data.lastStableValue;
-    return false;  // No change
-  }
-
-private:
-  int32_t checkConsistency(int32_t samples[], int32_t latestValue) {
-    uint8_t matchCount = 0;
-    for (int i = 0; i < DEBOUNCE_SAMPLES; i++) {
-      if (samples[i] == latestValue) {
-        matchCount++;
-      }
-    }
-
-    if (matchCount >= DEBOUNCE_THRESHOLD) {
-      return latestValue;
-    }
-    return latestValue;  // Allow some jitter
-  }
-};
-
-EncoderDebouncer encoderDebouncer;
 
 //========================================================================
 // HELPER FUNCTIONS - DECLARATIONS
@@ -673,7 +507,7 @@ void setup() {
     key[i].keyNoteName = getNoteName(i);
     key[i].colourActive = 1;
     key[i].x = i * 27;
-    
+
     if (whiteKeys[i]) {
       key[i].y = 20;
       key[i].colourIdle = 5;
@@ -681,7 +515,7 @@ void setup() {
       key[i].y = 10;
       key[i].colourIdle = 3;
     }
-    
+
     key[i].octaveNo = currentOctave;
     key[i].octaveS = String(currentOctave);
   }
@@ -738,8 +572,8 @@ void loop() {
   static unsigned long lastUpdate = 0;
   static unsigned long lastStatusCheck = 0;
   static bool lastSwitchState = false;
-  static int32_t lastEncoderValues[8] = {0};
-  static bool buttonWasPressed[8] = {false};
+  static int32_t lastEncoderValues[8] = { 0 };
+  static bool buttonWasPressed[8] = { false };
 
   // Rate limiting: only update at specified interval
   if (millis() - lastUpdate < UPDATE_INTERVAL) {
@@ -752,26 +586,13 @@ void loop() {
   // ==================================================================
   // READ SWITCH STATE
   // ==================================================================
-  bool currentSwitchState = false;
-  try {
-    currentSwitchState = sensor.getSwitchStatus();
-    i2cManager.resetErrorCount();
-  } catch (...) {
-    Serial.println("Error reading switch status");
-    if (!i2cManager.handleErrors()) {
-      return;
-    }
-  }
+  bool currentSwitchState = sensor.getSwitchStatus();
+  i2cManager.resetErrorCount();
 
   // Handle switch state change
   if (currentSwitchState != lastSwitchState) {
     // Update LED 9 based on switch state
-    try {
-      sensor.setLEDColor(8, currentSwitchState ? LED_COLOR_GREEN : LED_COLOR_OFF);
-    } catch (...) {
-      Serial.println("Error setting LED color");
-      return;
-    }
+    sensor.setLEDColor(8, currentSwitchState ? LED_COLOR_GREEN : LED_COLOR_OFF);
     lastSwitchState = currentSwitchState;
 
     // Redraw entire display for switch state change
@@ -809,7 +630,7 @@ void loop() {
   // READ ENCODERS AND BUTTONS
   // ==================================================================
   bool encoderChanged = false;
-  
+
   for (int i = 0; i < NUM_ENCODERS; i++) {
     int32_t currentValue = 0;
     uint8_t rawButtonState = 1;  // Default to not pressed (pulled up)
@@ -822,10 +643,13 @@ void loop() {
       continue;
     }
 
+// debugging
+#if DEBUG_VERBOSE
     Serial.print("Encoder ");
     Serial.print(i);
     Serial.print(" rawButtonState: ");
     Serial.println(rawButtonState);
+#endif
 
     bool buttonPressed = (rawButtonState == 0);  // Active low
 
@@ -1037,7 +861,7 @@ void loop() {
     // ==================================================================
     // HANDLE BUTTON PRESS/HOLD/RELEASE
     // ==================================================================
-    
+
     // Button press detected
     if (buttonPressed && !buttonWasPressed[i]) {
       if (enc[i].isActive && waitingForNextPress[i]) {
@@ -1048,22 +872,14 @@ void loop() {
         enc[i].isActive = false;
         enc[i].shortPress = false;
         waitingForNextPress[i] = false;
-        try {
-          sensor.setLEDColor(i, LED_COLOR_OFF);
-        } catch (...) {
-          Serial.println("Error setting LED color");
-        }
+        sensor.setLEDColor(i, LED_COLOR_OFF);
         encoderChanged = true;
       } else if (!enc[i].isActive) {
         // New press on inactive encoder - start timing for hold
         buttonPressStartTime[i] = millis();
         buttonHoldProcessed[i] = false;
         enc[i].shortPress = true;  // Show orange indicator
-        try {
-          sensor.setLEDColor(i, LED_COLOR_ORANGE);
-        } catch (...) {
-          Serial.println("Error setting LED color");
-        }
+        sensor.setLEDColor(i, LED_COLOR_ORANGE);
         Serial.print("Encoder ");
         Serial.print(i);
         Serial.println(" button pressed - waiting for hold");
@@ -1075,11 +891,7 @@ void loop() {
       if (!enc[i].isActive && !buttonHoldProcessed[i]) {
         // Short press released - turn off orange indicator
         enc[i].shortPress = false;
-        try {
-          sensor.setLEDColor(i, LED_COLOR_OFF);
-        } catch (...) {
-          Serial.println("Error setting LED color");
-        }
+        sensor.setLEDColor(i, LED_COLOR_OFF);
         encoderChanged = true;
       }
     }
@@ -1094,11 +906,7 @@ void loop() {
         enc[i].isActive = true;
         enc[i].shortPress = false;
         waitingForNextPress[i] = true;
-        try {
-          sensor.setLEDColor(i, LED_COLOR_GREEN);
-        } catch (...) {
-          Serial.println("Error setting LED color");
-        }
+        sensor.setLEDColor(i, LED_COLOR_GREEN);
         encoderChanged = true;
         buttonHoldProcessed[i] = true;
       }
@@ -1246,10 +1054,10 @@ bool initializeSprites() {
 
 // Draw the top info area showing current scale/root/formula
 void drawInfoArea() {
-  infoSpriteBuffer.fillSprite(0);
-
+  // Note: sprite is already cleared by caller before drawInfoArea()
+  
   // Draw rounded rectangle border
-  infoSpriteBuffer.setColor(1);
+  infoSpriteBuffer.setColor(PAL_WHITE);
   infoSpriteBuffer.drawRoundRect(0, 0, 186, 50, 10);
   infoSpriteBuffer.drawRoundRect(1, 1, 186 - 2, 50 - 2, 10);
 
@@ -1257,7 +1065,7 @@ void drawInfoArea() {
   infoSpriteBuffer.setTextSize(0.55);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
   infoSpriteBuffer.setCursor(10, 10);
-  infoSpriteBuffer.setTextColor(1);
+  infoSpriteBuffer.setTextColor(PAL_WHITE);
   String rootName = cachedRootName;
   if (rootName.endsWith("-")) {
     rootName = rootName.substring(0, rootName.length() - 1);
@@ -1268,31 +1076,31 @@ void drawInfoArea() {
   infoSpriteBuffer.setTextSize(0.4);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
   infoSpriteBuffer.setCursor(37, 15);
-  infoSpriteBuffer.setTextColor(1);
+  infoSpriteBuffer.setTextColor(PAL_WHITE);
   infoSpriteBuffer.printf(cachedScaleName.c_str());
 
   // Draw interval formula
   infoSpriteBuffer.setTextSize(0.35);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
   infoSpriteBuffer.setCursor(190, 15);
-  infoSpriteBuffer.setTextColor(1);
-  infoSpriteBuffer.printf(intvlFormula[scaleNo].c_str());
+  infoSpriteBuffer.setTextColor(PAL_WHITE);
+  infoSpriteBuffer.printf(intvlFormula[scaleNo]);
 
   Serial.print("Drawing info - Root: ");
   Serial.print(rootName);
   Serial.print(", Scale: ");
   Serial.print(cachedScaleName);
   Serial.print(", Formula: ");
-  Serial.println(intvlFormula[scaleNo]);
+  Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
 }
 
 // Draw the toggle switch indicator
 void drawSwitchIndicator(bool isOn) {
-  encsSpriteBuffer.fillRect(305, 8, 10, 20, 0);  // Clear area
-  encsSpriteBuffer.setColor(isOn ? 7 : 3);       // Green if on, grey if off
-  int yPos = isOn ? 8 : 18;                      // Top position when on
+  encsSpriteBuffer.fillRect(305, 8, 10, 20, PAL_TRANSPARENT);  // Clear area
+  encsSpriteBuffer.setColor(isOn ? PAL_GREEN : PAL_DARKGREY);  // Green if on, grey if off
+  int yPos = isOn ? 8 : 18;                                     // Top position when on
   encsSpriteBuffer.fillRect(305, yPos, 10, 10);
-  encsSpriteBuffer.setColor(5);  // Light grey border
+  encsSpriteBuffer.setColor(PAL_LIGHTGREY);  // Light grey border
   encsSpriteBuffer.drawRect(305, 8, 10, 20);
 }
 
