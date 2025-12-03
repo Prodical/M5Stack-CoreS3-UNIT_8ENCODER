@@ -586,7 +586,7 @@ void setup() {
     return;
   }
 
-  // Initialize encoder display states and reset encoder values to 0
+  // Initialize encoder display states and set encoder values to 60 (velocity 127)
   for (int i = 0; i < NUM_ENCODERS; i++) {
     enc[i].r = 16;
     enc[i].x = 16 + i * 38;
@@ -596,7 +596,10 @@ void setup() {
     enc[i].colourIdle = 3;
     enc[i].colourActive = 7;
     sensor.setLEDColor(i, 0x000000);  // Turn off LEDs
-    sensor.resetCounter(i);           // Reset encoder to 0
+    sensor.resetCounter(i);           // Reset encoder
+    // Set initial count to 60 so velocity starts at 127
+    // This way CW turn has no effect (already at max), only ACW decreases
+    sensor.setEncoderValue(i, 60);
     delay(10);
   }
 
@@ -681,7 +684,7 @@ void loop() {
   static unsigned long lastUpdate = 0;
   static unsigned long lastStatusCheck = 0;
   static bool lastSwitchState = false;
-  static int32_t lastEncoderValues[8] = { 0 };
+  static int32_t lastEncoderValues[8] = { 60, 60, 60, 60, 60, 60, 60, 60 };  // Match startup values
   static bool buttonWasPressed[8] = { false };
 
   // Rate limiting: only update at specified interval

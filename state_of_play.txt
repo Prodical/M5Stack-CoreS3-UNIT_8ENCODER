@@ -1,5 +1,5 @@
 M5Stack CoreS3 UNIT_8ENCODER BLE MIDI Controller
-State of Play - 2025-12-02 23:12 UTC
+State of Play - 2025-12-03 17:47 UTC
 
 === COMPLETED FEATURES ===
 
@@ -26,12 +26,13 @@ State of Play - 2025-12-02 23:12 UTC
    - Formula corrects for MIDI standard (C4 = note 60)
    - C Major default: encoder 0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B
 
-4. Per-Encoder Velocity Control (2025-12-02 22:00 UTC)
+4. Per-Encoder Velocity Control (2025-12-03 17:47 UTC)
    - Switch OFF: Encoder rotation controls velocity (0-127)
    - 60 clicks per full turn (30 detents × 2 clicks/detent)
-   - CW turn increases velocity, ACW decreases
+   - Encoders initialize to 60 (velocity 127) via sensor.setEncoderValue()
+   - ACW turn decreases velocity from 127 to 0
+   - CW turn has no effect when already at max (clamped at 127)
    - Values clamped 0-127
-   - All encoders initialize to 0 on reset via sensor.resetCounter()
 
 5. Velocity Visualization (2025-12-02 22:45 UTC)
    - Mid-grey bars display velocity for each scale note
