@@ -84,7 +84,7 @@ const uint8_t PAL_ORANGE = 9;
 // BLE MIDI CONFIGURATION
 //========================================================================
 bool bleMidiConnected = false;
-uint8_t midiChannel = 1;           // MIDI channel (1-16)
+uint8_t midiChannel = 1;  // MIDI channel (1-16)
 
 // Per-encoder velocity (0-127), controlled by encoder rotation when switch is OFF
 // Initialized to 127 (encoder at 0 position = full velocity)
@@ -95,7 +95,7 @@ uint8_t encoderVelocity[7] = { 127, 127, 127, 127, 127, 127, 127 };
 //========================================================================
 const uint16_t DISPLAY_WIDTH = 320;
 const uint16_t DISPLAY_HEIGHT = 240;
-const uint16_t INFO_SPRITE_HEIGHT = 50;
+const uint16_t INFO_SPRITE_HEIGHT = 52;
 const uint16_t KEYS_SPRITE_HEIGHT = 150;
 const uint16_t ENCS_SPRITE_HEIGHT = 40;
 
@@ -109,6 +109,19 @@ const uint8_t NUM_KEYS = 12;
 const int8_t ENCODER_MAX_VALUE = 60;
 const int8_t ENCODER_MIN_VALUE = -60;
 
+enum EncoderMode {
+  MODE_DEFAULT = 0,
+  MODE_SCALE,
+  MODE_ROOT,
+  MODE_OCTAVE
+};
+EncoderMode encoder7Mode = MODE_DEFAULT;
+bool modeChanged = true;  // Force initial display update
+
+static bool encoder7ButtonWasPressed = false;
+static unsigned long encoder7ButtonPressTime = 0;
+static bool encoder7ModeChangePending = false;
+
 
 //========================================================================
 // TIMING & UPDATE CONFIGURATION
@@ -116,6 +129,11 @@ const int8_t ENCODER_MIN_VALUE = -60;
 const unsigned long UPDATE_INTERVAL = 50;     // 100fps for smooth updates
 const unsigned long STATUS_INTERVAL = 5000;   // 5 seconds
 const unsigned long BUTTON_HOLD_TIME = 1000;  // 1 second hold time
+const unsigned long FLASH_INTERVAL = 100;     // 5Hz flash (100ms on, 100ms off)
+
+// Flash state tracking
+static unsigned long lastFlashToggle = 0;
+static bool flashState = false;  // true = visible, false = hidden
 
 //========================================================================
 // I2C ERROR RECOVERY CONFIGURATION
@@ -195,11 +213,12 @@ struct Encoders {
     // Determine circle color based on state
     uint8_t circleColor;
     if (this->isActive) {
-      circleColor = PAL_GREEN;     // Green for active/locked
+      circleColor = PAL_GREEN;  // Green for active/locked
     } else if (this->shortPress) {
-      circleColor = PAL_ORANGE;    // Orange for short press
+      // Encoder 7: white on short press, others: orange
+      circleColor = (encNo == 7) ? PAL_WHITE : PAL_ORANGE;
     } else {
-      circleColor = PAL_DARKGREY;  // Grey for idle
+      circleColor = this->colourIdle;  // Use encoder's idle color (mid grey for enc 7, dark grey for others)
     }
 
     // Draw filled circle
@@ -278,21 +297,24 @@ struct Keys {
     // Color: green for root, white for in-scale, grey for out-of-scale
     if (this->inScale) {
       if (this->isFundamental) {
-        keysSpriteBuffer.setTextColor(PAL_GREEN);     // Green for root
+        keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
       } else {
-        keysSpriteBuffer.setTextColor(PAL_WHITE);     // White for scale notes
+        keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for scale notes
       }
     } else {
-      keysSpriteBuffer.setTextColor(PAL_DARKGREY);    // Grey for non-scale notes
+      keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for non-scale notes
     }
     keysSpriteBuffer.printf(this->keyNoteName.c_str());
 
-    // Draw octave number
+    // Draw octave number (flash between white/green and mid grey in MODE_OCTAVE)
+    bool hideOctave = (encoder7Mode == MODE_OCTAVE && !flashState && this->inScale);
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 15);
 
     if (this->inScale) {
-      if (this->isFundamental) {
+      if (hideOctave) {
+        keysSpriteBuffer.setTextColor(PAL_MEDGREY);
+      } else if (this->isFundamental) {
         keysSpriteBuffer.setTextColor(PAL_GREEN);
       } else {
         keysSpriteBuffer.setTextColor(PAL_WHITE);
@@ -321,33 +343,33 @@ struct Keys {
           break;
         }
       }
-      
+
       if (encoderIdx >= 0 && encoderIdx < 7) {
         // Bar dimensions: fixed base height 85, max height 35 (within keys sprite)
         int barX = this->x + w / 2 - 2;  // Center horizontally (5px wide)
-        int barBase = 85;                  // Fixed base for white keys
+        int barBase = 85;                // Fixed base for white keys
         // Offset bar base upward for black keys (same offset as key positioning: 10px)
         if (!whiteKeys[keyNo]) {
           barBase -= 10;  // Black keys offset
         }
-        int maxBarHeight = 35;             // Fixed max height
+        int maxBarHeight = 35;  // Fixed max height
         int barTop = barBase - maxBarHeight;
-        
+
         // Map velocity (0-127) to bar height
         // CW turn increases height from 0 to max, ACW decreases from max to 0
         uint8_t velocity = encoderVelocity[encoderIdx];
         int barHeight = (velocity * maxBarHeight) / 127;
         if (barHeight < 0) barHeight = 0;
         if (barHeight > maxBarHeight) barHeight = maxBarHeight;
-        
+
         // Determine bar color based on button state of corresponding encoder
         uint8_t barColor = PAL_MEDGREY;  // Default: mid grey
         if (enc[encoderIdx].isActive) {
-          barColor = PAL_GREEN;          // Hold: green (active/locked)
+          barColor = PAL_GREEN;  // Hold: green (active/locked)
         } else if (enc[encoderIdx].shortPress) {
-          barColor = PAL_ORANGE;         // Short press: orange
+          barColor = PAL_ORANGE;  // Short press: orange
         }
-        
+
         // Draw bar from bottom up (base to base-height)
         int barY = barBase - barHeight;
         keysSpriteBuffer.setColor(barColor);
@@ -477,15 +499,15 @@ bool isValueStable(int32_t newValue, uint8_t encoderIndex);
 // MIDI note 60 = C4, so formula is: note + ((octave + 1) * 12)
 uint8_t getEncoderMidiNote(uint8_t encoderIndex) {
   if (encoderIndex > 6) return 0;  // Encoder 7 doesn't send notes
-  
+
   int8_t scaleNote = scalemanager.getScaleNote(encoderIndex);
   if (scaleNote >= 12) scaleNote -= 12;
-  
+
   // MIDI standard: C4 = 60, so octave 4 -> (4+1)*12 = 60 for C
   int midiNote = scaleNote + ((currentOctave + 1) * 12);
   if (midiNote < 0) midiNote = 0;
   if (midiNote > 127) midiNote = 127;
-  
+
   return (uint8_t)midiNote;
 }
 
@@ -593,7 +615,8 @@ void setup() {
     enc[i].y = 16;
     enc[i].isActive = false;
     enc[i].shortPress = false;
-    enc[i].colourIdle = 3;
+    // Encoder 7 is mid grey by default, others are dark grey
+    enc[i].colourIdle = (i == 7) ? 4 : 3;  // 4 = PAL_MEDGREY, 3 = PAL_DARKGREY
     enc[i].colourActive = 7;
     sensor.setLEDColor(i, 0x000000);  // Turn off LEDs
     sensor.resetCounter(i);           // Reset encoder
@@ -675,6 +698,154 @@ void setup() {
   encsSprite.pushSprite(0, 200);
 
   Serial.println("Setup complete");
+}
+
+//========================================================================
+// ENCODER VALUE HANDLING FUNCTION
+//========================================================================
+bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& lastValue, bool currentSwitchState, uint8_t rawButtonState) {
+  static bool encoderInitialized[8] = { false };
+  static int32_t encoder8LastValue = 0;  // Only need this one now
+  static bool encoder7ButtonWasPressed = false;
+  static unsigned long encoder7ButtonPressTime = 0;
+
+  bool encoderChanged = false;
+
+  // Update the last value
+  lastValue = currentValue;
+
+  // Encoders 0-6: Switch OFF controls velocity
+  if (!currentSwitchState && encoderIndex <= 6) {
+    // Map encoder value to velocity: CW increases, ACW decreases
+    int vel = (currentValue * 127) / 60;
+    if (vel < 0) vel = 0;
+    if (vel > 127) vel = 127;
+    encoderVelocity[encoderIndex] = (uint8_t)vel;
+    encoderChanged = true;
+  }
+  // Encoder 7: always show rotation, but only act on parameters when NOT in MODE_DEFAULT
+  else if (encoderIndex == 7) {
+    if (!encoderInitialized[encoderIndex]) {
+      encoder8LastValue = currentValue;
+      encoderInitialized[encoderIndex] = true;
+      Serial.println("Encoder 7 initialized");
+      encoderChanged = true;
+    } else {
+      // Handle encoder rotation based on current mode
+      int32_t delta = 0;
+      if (currentValue != encoder8LastValue) {
+        encoderChanged = true;  // Always show rotation on GUI
+        delta = (currentValue > encoder8LastValue) ? 1 : -1;
+        Serial.print("Encoder 7 delta (mode ");
+        Serial.print(encoder7Mode);
+        Serial.print("): ");
+        Serial.println(delta);
+      }
+
+      // Only process parameter changes when NOT in MODE_DEFAULT
+      if (encoder7Mode != MODE_DEFAULT) {
+        Serial.print("Processing parameter encoder 7, mode: ");
+        switch (encoder7Mode) {
+          case MODE_DEFAULT: Serial.println("DEFAULT (no action)"); break;
+          case MODE_SCALE: Serial.println("SCALE"); break;
+          case MODE_ROOT: Serial.println("ROOT"); break;
+          case MODE_OCTAVE: Serial.println("OCTAVE"); break;
+        }
+
+        if (delta != 0) {
+          static int32_t stepAccumulator = 0;
+          stepAccumulator += delta;
+
+          if (abs(stepAccumulator) >= 2) {
+            int change = stepAccumulator / 2;
+            stepAccumulator = 0;
+
+            switch (encoder7Mode) {
+              case MODE_SCALE:
+                {
+                  Serial.print("Scale change triggered: ");
+                  Serial.println(change);
+                  int newScale = scaleNo + change;
+                  if (newScale > 8) newScale = 0;
+                  else if (newScale < 0) newScale = 8;
+
+                  scaleNo = newScale;
+                  scalemanager.setScale(scaleNo);
+                  scaleCacheNeedsUpdate = true;
+                  updateScaleCache();
+
+                  for (int j = 0; j < NUM_KEYS; j++) key[j].inScale = false;
+                  for (int j = 0; j < 7; j++) {
+                    int scaleNote = scalemanager.getScaleNote(j);
+                    if (scaleNote < 12) key[scaleNote].inScale = true;
+                    else key[scaleNote - 12].inScale = true;
+                  }
+
+                  setScaleIntervals();
+                  encoderChanged = true;
+                  break;
+                }
+
+              case MODE_ROOT:
+                {
+                  Serial.print("Root change triggered: ");
+                  Serial.println(change);
+                  int newFundamental = fundamental + change;
+                  if (newFundamental > 11) newFundamental = 0;
+                  else if (newFundamental < 0) newFundamental = 11;
+
+                  fundamental = newFundamental;
+                  scalemanager.setFundamental(fundamental);
+                  scaleCacheNeedsUpdate = true;
+                  updateScaleCache();
+
+                  for (int j = 0; j < NUM_KEYS; j++) key[j].isFundamental = false;
+                  key[fundamental].isFundamental = true;
+
+                  for (int j = 0; j < NUM_KEYS; j++) key[j].inScale = false;
+                  for (int j = 0; j < 7; j++) {
+                    scaleNoteNo[j] = scalemanager.getScaleNote(j);
+                    if (scaleNoteNo[j] < 12) key[scaleNoteNo[j]].inScale = true;
+                    else key[scaleNoteNo[j] - 12].inScale = true;
+                  }
+
+                  setScaleIntervals();
+                  updateOctaveNumbers();
+                  encoderChanged = true;
+                  break;
+                }
+
+              case MODE_OCTAVE:
+                {
+                  Serial.print("Octave change triggered: ");
+                  Serial.println(change);
+                  int newOctave = currentOctave + change;
+                  if (newOctave > 9) newOctave = -1;
+                  else if (newOctave < -1) newOctave = 9;
+
+                  currentOctave = newOctave;
+                  for (int j = 0; j < NUM_KEYS; j++) {
+                    if (key[j].inScale) {
+                      key[j].octaveNo = currentOctave;
+                      key[j].octaveS = String(currentOctave);
+                    }
+                  }
+                  encoderChanged = true;
+                  break;
+                }
+
+              case MODE_DEFAULT:
+                // No action in default mode
+                break;
+            }
+          }
+        }
+      }
+      encoder8LastValue = currentValue;
+    }
+  }
+
+  return encoderChanged;
 }
 
 //========================================================================
@@ -760,10 +931,10 @@ void loop() {
 
 // debugging
 #if DEBUG_VERBOSE
-    Serial.print("Encoder ");
-    Serial.print(i);
-    Serial.print(" rawButtonState: ");
-    Serial.println(rawButtonState);
+    // Serial.print("Encoder ");
+    // Serial.print(i);
+    // Serial.print(" rawButtonState: ");
+    // Serial.println(rawButtonState);
 #endif
 
     bool buttonPressed = (rawButtonState == 0);  // Active low
@@ -776,210 +947,12 @@ void loop() {
     // HANDLE ENCODER VALUE CHANGES
     // ==================================================================
     if (stableValue != lastEncoderValues[i]) {
-      encoderChanged = true;
-      lastEncoderValues[i] = stableValue;
-
-      // Switch OFF: encoders 0-6 rotation controls velocity (0-127 mapped to 1 full turn)
-      // Switch ON: encoders 5-7 control musical parameters, 0-4 do nothing (yet)
-      if (!currentSwitchState && i <= 6) {
-        // Map encoder value to velocity: CW increases, ACW decreases
-        // 60 clicks per turn: vel = (encoder_value * 127) / 60
-        int vel = (stableValue * 127) / 60;
-        if (vel < 0) vel = 0;
-        if (vel > 127) vel = 127;
-        encoderVelocity[i] = (uint8_t)vel;
-      } else if (currentSwitchState && (i == 5 || i == 6 || i == 7)) {
-        Serial.print("Processing parameter encoder ");
-        Serial.println(i);
-
-        // ---------------------------------------------------------------
-        // ENCODER 7 (index 6): ROOT NOTE SELECTION
-        // ---------------------------------------------------------------
-        if (i == 6) {
-          if (!encoderInitialized[i]) {
-            encoder7LastValue = stableValue;
-            encoderInitialized[i] = true;
-            Serial.println("Physical Encoder 7 initialized");
-          } else {
-            int32_t delta = 0;
-            if (stableValue != encoder7LastValue) {
-              delta = (stableValue > encoder7LastValue) ? 1 : -1;
-              Serial.print("Root encoder delta: ");
-              Serial.println(delta);
-            }
-
-            if (delta != 0) {
-              static int32_t stepAccumulator = 0;
-              stepAccumulator += delta;
-
-              // Require 2 steps before changing (reduces sensitivity)
-              if (abs(stepAccumulator) >= 2) {
-                int fundamentalChange = stepAccumulator / 2;
-                stepAccumulator = 0;
-                Serial.print("Root change triggered: ");
-                Serial.println(fundamentalChange);
-                int newFundamental = fundamental + fundamentalChange;
-
-                // Wrap at boundaries (0-11 chromatic notes)
-                if (newFundamental > 11) {
-                  newFundamental = 0;
-                  Serial.println("Wrapping from 11 to 0");
-                } else if (newFundamental < 0) {
-                  newFundamental = 11;
-                  Serial.println("Wrapping from 0 to 11");
-                }
-
-                fundamental = newFundamental;
-                scalemanager.setFundamental(fundamental);
-                scaleCacheNeedsUpdate = true;
-                updateScaleCache();
-
-                // Reset fundamental flags
-                for (int j = 0; j < NUM_KEYS; j++) {
-                  key[j].isFundamental = false;
-                }
-                key[fundamental].isFundamental = true;
-
-                // Reset scale flags
-                for (int j = 0; j < NUM_KEYS; j++) {
-                  key[j].inScale = false;
-                }
-
-                // Get fresh scale notes
-                for (int j = 0; j < 7; j++) {
-                  scaleNoteNo[j] = scalemanager.getScaleNote(j);
-                  if (scaleNoteNo[j] < 12) {
-                    key[scaleNoteNo[j]].inScale = true;
-                  } else {
-                    key[scaleNoteNo[j] - 12].inScale = true;
-                  }
-                }
-
-                setScaleIntervals();
-                updateOctaveNumbers();
-                encoderChanged = true;
-              }
-            }
-            encoder7LastValue = stableValue;
-          }
-        }
-        // ---------------------------------------------------------------
-        // ENCODER 6 (index 5): OCTAVE SELECTION
-        // ---------------------------------------------------------------
-        else if (i == 5) {
-          if (!encoderInitialized[i]) {
-            encoder6LastValue = stableValue;
-            encoderInitialized[i] = true;
-            Serial.println("Physical Encoder 6 initialized");
-          } else {
-            int32_t delta = 0;
-            if (stableValue != encoder6LastValue) {
-              delta = (stableValue > encoder6LastValue) ? 1 : -1;
-              Serial.print("Octave encoder delta: ");
-              Serial.println(delta);
-            }
-
-            if (delta != 0) {
-              static int32_t stepAccumulator = 0;
-              stepAccumulator += delta;
-
-              if (abs(stepAccumulator) >= 2) {
-                int octaveChange = stepAccumulator / 2;
-                stepAccumulator = 0;
-                Serial.print("Octave change triggered: ");
-                Serial.println(octaveChange);
-                int newOctave = currentOctave + octaveChange;
-
-                // Wrap at boundaries (-1 to 9)
-                if (newOctave > 9) {
-                  newOctave = -1;
-                  Serial.println("Wrapping from 9 to -1");
-                } else if (newOctave < -1) {
-                  newOctave = 9;
-                  Serial.println("Wrapping from -1 to 9");
-                }
-
-                currentOctave = newOctave;
-
-                // Update octave for all keys in scale
-                for (int j = 0; j < NUM_KEYS; j++) {
-                  if (key[j].inScale) {
-                    key[j].octaveNo = currentOctave;
-                    key[j].octaveS = String(currentOctave);
-                  }
-                }
-
-                encoderChanged = true;
-              }
-            }
-            encoder6LastValue = stableValue;
-          }
-        }
-        // ---------------------------------------------------------------
-        // ENCODER 8 (index 7): SCALE SELECTION
-        // ---------------------------------------------------------------
-        else if (i == 7) {
-          if (!encoderInitialized[i]) {
-            encoder8LastValue = stableValue;
-            encoderInitialized[i] = true;
-            Serial.println("Physical Encoder 8 initialized");
-          } else {
-            int32_t delta = 0;
-            if (stableValue != encoder8LastValue) {
-              delta = (stableValue > encoder8LastValue) ? 1 : -1;
-              Serial.print("Scale encoder delta: ");
-              Serial.println(delta);
-            }
-
-            if (delta != 0) {
-              static int32_t stepAccumulator = 0;
-              stepAccumulator += delta;
-
-              if (abs(stepAccumulator) >= 2) {
-                int scaleChange = stepAccumulator / 2;
-                stepAccumulator = 0;
-                Serial.print("Scale change triggered: ");
-                Serial.println(scaleChange);
-                int newScale = scaleNo + scaleChange;
-
-                // Wrap at boundaries (0-8 scales)
-                if (newScale > 8) {
-                  newScale = 0;
-                  Serial.println("Wrapping from 8 to 0");
-                } else if (newScale < 0) {
-                  newScale = 8;
-                  Serial.println("Wrapping from 0 to 8");
-                }
-
-                scaleNo = newScale;
-                scalemanager.setScale(scaleNo);
-                scaleCacheNeedsUpdate = true;
-                updateScaleCache();
-
-                // Reset scale flags
-                for (int j = 0; j < NUM_KEYS; j++) {
-                  key[j].inScale = false;
-                }
-
-                // Set scale flags from scale manager
-                for (int j = 0; j < 7; j++) {
-                  int scaleNote = scalemanager.getScaleNote(j);
-                  if (scaleNote < 12) {
-                    key[scaleNote].inScale = true;
-                  } else {
-                    key[scaleNote - 12].inScale = true;
-                  }
-                }
-
-                setScaleIntervals();
-                encoderChanged = true;
-              }
-            }
-            encoder8LastValue = stableValue;
-          }
-        }
-      }  // end switch ON encoder 5-7 handling
+      // Handle encoder value changes in separate function to avoid scoping issues
+      if (handleEncoderValueChange(i, stableValue, lastEncoderValues[i], currentSwitchState, rawButtonState)) {
+        encoderChanged = true;
+      }
     }
+
 
     // ==================================================================
     // HANDLE BUTTON PRESS/HOLD/RELEASE
@@ -987,10 +960,19 @@ void loop() {
 
     // Button press detected
     if (buttonPressed && !buttonWasPressed[i]) {
+      // Encoder 7: mode cycling on short press (no MIDI)
+      if (i == 7) {
+        buttonPressStartTime[i] = millis();
+        enc[i].shortPress = true;  // Show white indicator
+        encoderChanged = true;
+        buttonWasPressed[i] = buttonPressed;
+        continue;
+      }
+
       // Only encoders 0-6 send MIDI notes (switch OFF mode)
       // Switch ON: buttons don't send MIDI (encoders 5-7 control params)
       bool sendsMidi = !currentSwitchState && i <= 6;
-      
+
       if (enc[i].isActive && waitingForNextPress[i]) {
         // Pressing active encoder deactivates it - send NoteOff
         if (bleMidiConnected && sendsMidi) {
@@ -1026,8 +1008,28 @@ void loop() {
     }
     // Button released
     else if (!buttonPressed && buttonWasPressed[i]) {
+      // Encoder 7: cycle mode on short press release
+      if (i == 7) {
+        unsigned long pressDuration = millis() - buttonPressStartTime[i];
+        if (pressDuration < 500) {  // Short press cycles mode
+          encoder7Mode = static_cast<EncoderMode>((encoder7Mode + 1) % 4);  // 4 modes now
+          modeChanged = true;
+          Serial.print("Encoder 7 mode changed to: ");
+          switch (encoder7Mode) {
+            case MODE_DEFAULT: Serial.println("DEFAULT"); break;
+            case MODE_SCALE: Serial.println("SCALE"); break;
+            case MODE_ROOT: Serial.println("ROOT"); break;
+            case MODE_OCTAVE: Serial.println("OCTAVE"); break;
+          }
+        }
+        enc[i].shortPress = false;  // Turn off white indicator
+        encoderChanged = true;
+        buttonWasPressed[i] = buttonPressed;
+        continue;
+      }
+
       bool sendsMidi = !currentSwitchState && i <= 6;
-      
+
       // Only send NoteOff on release if it was a short press (not held/active)
       if (!enc[i].isActive && !buttonHoldProcessed[i]) {
         if (bleMidiConnected && sendsMidi) {
@@ -1062,9 +1064,22 @@ void loop() {
   }
 
   // ==================================================================
+  // HANDLE FLASHING FOR ACTIVE MODES
+  // ==================================================================
+  unsigned long currentTime = millis();
+  if (currentTime - lastFlashToggle >= FLASH_INTERVAL) {
+    flashState = !flashState;
+    lastFlashToggle = currentTime;
+    // Force redraw when in any active mode
+    if (encoder7Mode != MODE_DEFAULT) {
+      modeChanged = true;
+    }
+  }
+
+  // ==================================================================
   // UPDATE DISPLAY IF CHANGES OCCURRED
   // ==================================================================
-  if (encoderChanged) {
+  if (encoderChanged || modeChanged) {
     infoSpriteBuffer.fillSprite(0);
     keysSpriteBuffer.fillSprite(0);
     encsSpriteBuffer.fillSprite(0);
@@ -1090,8 +1105,11 @@ void loop() {
     encsSpriteBuffer.pushSprite(&encsSprite, 0, 0);
 
     infoSprite.pushSprite(0, 0);
-    keysSprite.pushSprite(0, 50);
+    keysSprite.pushSprite(0, 52);  // Moved down 2px to avoid cutoff of info sprite
     encsSprite.pushSprite(0, 200);
+
+    // Reset modeChanged flag after handling
+    modeChanged = false;
   }
 }
 
@@ -1103,7 +1121,7 @@ void loop() {
 bool initializeSprites() {
   // Info sprite (top bar with scale info)
   infoSprite.setColorDepth(4);
-  if (!infoSprite.createSprite(320, 50)) return false;
+  if (!infoSprite.createSprite(320, 52)) return false;
   infoSprite.setPaletteColor(0, 0x0001);  // Transparent
   infoSprite.setPaletteColor(1, 0xffff);  // White
   infoSprite.setPaletteColor(2, 0x0000);  // Black
@@ -1151,7 +1169,7 @@ bool initializeSprites() {
 
   // Initialize buffer sprites (same configuration as main sprites)
   infoSpriteBuffer.setColorDepth(4);
-  if (!infoSpriteBuffer.createSprite(320, 50)) return false;
+  if (!infoSpriteBuffer.createSprite(320, 52)) return false;
   infoSpriteBuffer.setPaletteColor(0, 0x0001);
   infoSpriteBuffer.setPaletteColor(1, 0xffff);
   infoSpriteBuffer.setPaletteColor(2, 0x0000);
@@ -1201,50 +1219,81 @@ bool initializeSprites() {
 // Draw the top info area showing current scale/root/formula
 void drawInfoArea() {
   // Note: sprite is already cleared by caller before drawInfoArea()
-  
-  // Draw rounded rectangle border
-  infoSpriteBuffer.setColor(PAL_WHITE);
-  infoSpriteBuffer.drawRoundRect(0, 0, 186, 50, 10);
-  infoSpriteBuffer.drawRoundRect(1, 1, 186 - 2, 50 - 2, 10);
 
-  // Draw root note name (without octave number)
+  // Determine if we should flash (hide) based on mode
+  bool hideRoot = (encoder7Mode == MODE_ROOT && !flashState);
+  bool hideScale = (encoder7Mode == MODE_SCALE && !flashState);
+
+  // Calculate bounding box for scale info
+  int boxWidth = 176;  // Fixed width to properly contain all scale names
+  int boxHeight = 52;  // Original 50 + 2px
+  
+  // Draw rounded rectangle outline around all labels
+  infoSpriteBuffer.setColor(PAL_WHITE);
+  infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
+
+  // Draw root note name (without octave number) - shifted 3px down and right
   infoSpriteBuffer.setTextSize(0.55);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
-  infoSpriteBuffer.setCursor(10, 10);
-  infoSpriteBuffer.setTextColor(PAL_WHITE);
+  infoSpriteBuffer.setCursor(3, 3);
+  if (hideRoot) {
+    infoSpriteBuffer.setTextColor(PAL_MEDGREY);
+  } else {
+    infoSpriteBuffer.setTextColor(PAL_WHITE);
+  }
   String rootName = cachedRootName;
   if (rootName.endsWith("-")) {
     rootName = rootName.substring(0, rootName.length() - 1);
   }
   infoSpriteBuffer.printf(rootName.c_str());
 
-  // Draw scale name
+  // Draw scale name - shifted 3px down and right
   infoSpriteBuffer.setTextSize(0.4);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
-  infoSpriteBuffer.setCursor(37, 15);
-  infoSpriteBuffer.setTextColor(PAL_WHITE);
+  infoSpriteBuffer.setCursor(30, 8);
+  if (hideScale) {
+    infoSpriteBuffer.setTextColor(PAL_MEDGREY);
+  } else {
+    infoSpriteBuffer.setTextColor(PAL_WHITE);
+  }
   infoSpriteBuffer.printf(cachedScaleName.c_str());
 
-  // Draw interval formula
+  // Draw interval formula - shifted 3px down and right
   infoSpriteBuffer.setTextSize(0.35);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
-  infoSpriteBuffer.setCursor(190, 15);
+  infoSpriteBuffer.setCursor(3, 33);
   infoSpriteBuffer.setTextColor(PAL_WHITE);
   infoSpriteBuffer.printf(intvlFormula[scaleNo]);
 
-  Serial.print("Drawing info - Root: ");
-  Serial.print(rootName);
-  Serial.print(", Scale: ");
-  Serial.print(cachedScaleName);
-  Serial.print(", Formula: ");
-  Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
+  // Serial.print("Drawing info - Root: ");
+  // Serial.print(rootName);
+  // Serial.print(", Scale: ");
+  // Serial.print(cachedScaleName);
+  // Serial.print(", Formula: ");
+  // Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
+
+  // Add mode indicator when switch is ON
+  if (currentSwitchState) {
+    infoSpriteBuffer.setTextSize(0.35);
+    infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top right
+    infoSpriteBuffer.setCursor(310, 5);
+    infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+
+    String modeText = "MODE: ";
+    switch (encoder7Mode) {
+      case MODE_SCALE: modeText += "SCALE"; break;
+      case MODE_ROOT: modeText += "ROOT"; break;
+      case MODE_OCTAVE: modeText += "OCTAVE"; break;
+    }
+    infoSpriteBuffer.printf(modeText.c_str());
+  }
 }
 
 // Draw the toggle switch indicator
 void drawSwitchIndicator(bool isOn) {
   encsSpriteBuffer.fillRect(305, 8, 10, 20, PAL_TRANSPARENT);  // Clear area
   encsSpriteBuffer.setColor(isOn ? PAL_GREEN : PAL_DARKGREY);  // Green if on, grey if off
-  int yPos = isOn ? 8 : 18;                                     // Top position when on
+  int yPos = isOn ? 8 : 18;                                    // Top position when on
   encsSpriteBuffer.fillRect(305, yPos, 10, 10);
   encsSpriteBuffer.setColor(PAL_LIGHTGREY);  // Light grey border
   encsSpriteBuffer.drawRect(305, 8, 10, 20);

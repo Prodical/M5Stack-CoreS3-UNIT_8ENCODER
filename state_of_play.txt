@@ -1,5 +1,5 @@
 M5Stack CoreS3 UNIT_8ENCODER BLE MIDI Controller
-State of Play - 2025-12-03 17:47 UTC
+State of Play - 2025-12-04 19:46 UTC
 
 === COMPLETED FEATURES ===
 
@@ -49,9 +49,28 @@ State of Play - 2025-12-03 17:47 UTC
    - Hold (1s): NoteOn on activation, NoteOff on deactivation by second press
    - LED feedback: orange (short press), green (active/hold)
 
+7. Encoder 7 Parameter Mode System (2025-12-04 19:46 UTC)
+   - Four modes: DEFAULT, SCALE, ROOT, OCTAVE
+   - Mode cycling via short button press (<500ms)
+   - Visual feedback:
+     * Encoder 7 circle: mid grey (idle), white (short press)
+     * MODE_SCALE: scale name flashes at 5Hz (white/mid-grey)
+     * MODE_ROOT: root note flashes at 5Hz (white/mid-grey)
+     * MODE_OCTAVE: octave numbers flash at 5Hz (white/green/mid-grey)
+   - MODE_DEFAULT: encoder rotation visible but no parameter changes
+   - Encoder rotation always updates GUI display
+   - Works regardless of switch state (consolidated control)
+
+8. Info Sprite Layout Redesign (2025-12-04 19:46 UTC)
+   - Root note: top-left corner (3, 3)
+   - Scale name: offset right (30, 8)
+   - Interval formula: below root (3, 33)
+   - Rounded rectangle outline (176px × 52px) around all labels
+   - Info sprite height: 52px (increased from 50px)
+   - Keys sprite position: Y=52 (moved down to prevent cutoff)
+
 === PENDING FEATURES ===
 
-- Encoder 7 rotation in Switch OFF mode: TBD (reserved)
 - Encoder 0-4 functionality in Switch ON mode: TBD
 
 === TECHNICAL NOTES ===
