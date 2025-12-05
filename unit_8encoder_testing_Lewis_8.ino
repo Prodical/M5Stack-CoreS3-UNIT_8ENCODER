@@ -62,6 +62,7 @@ const uint16_t COLOR_RED = 0xf800;
 const uint16_t COLOR_GREEN = 0x7e0;
 const uint16_t COLOR_BLUE = 0x00ff;
 const uint16_t COLOR_ORANGE = 0xfd20;
+const uint16_t COLOR_ORANGE_50 = 0xC400;
 
 // LED color constants for encoder hardware LEDs
 const uint32_t LED_COLOR_OFF = 0x000000;
@@ -79,6 +80,7 @@ const uint8_t PAL_RED = 6;
 const uint8_t PAL_GREEN = 7;
 const uint8_t PAL_BLUE = 8;
 const uint8_t PAL_ORANGE = 9;
+const uint8_t PAL_ORANGE_50 = 10;
 
 //========================================================================
 // BLE MIDI CONFIGURATION
@@ -95,8 +97,8 @@ uint8_t encoderVelocity[7] = { 127, 127, 127, 127, 127, 127, 127 };
 //========================================================================
 const uint16_t DISPLAY_WIDTH = 320;
 const uint16_t DISPLAY_HEIGHT = 240;
-const uint16_t INFO_SPRITE_HEIGHT = 52;
-const uint16_t KEYS_SPRITE_HEIGHT = 150;
+const uint16_t INFO_SPRITE_HEIGHT = 55;
+const uint16_t KEYS_SPRITE_HEIGHT = 145;
 const uint16_t ENCS_SPRITE_HEIGHT = 40;
 
 //========================================================================
@@ -129,7 +131,7 @@ static bool encoder7ModeChangePending = false;
 const unsigned long UPDATE_INTERVAL = 50;     // 100fps for smooth updates
 const unsigned long STATUS_INTERVAL = 5000;   // 5 seconds
 const unsigned long BUTTON_HOLD_TIME = 1000;  // 1 second hold time
-const unsigned long FLASH_INTERVAL = 100;     // 5Hz flash (100ms on, 100ms off)
+const unsigned long FLASH_INTERVAL = 200;     // 2.5Hz flash (200ms on, 200ms off)
 
 // Flash state tracking
 static unsigned long lastFlashToggle = 0;
@@ -145,6 +147,46 @@ const uint16_t I2C_ERROR_DELAY = 1000;  // ms
 //========================================================================
 // MUSICAL SCALE CONFIGURATION
 //========================================================================
+
+//========================================================================
+// CHORD SYSTEM
+//========================================================================
+
+// Chord types
+enum ChordType {
+  CHORD_TRIAD = 0,
+  CHORD_SEVENTH,
+  CHORD_MINOR_TRIAD,
+  CHORD_MINOR_SEVENTH,
+  CHORD_DIMINISHED,
+  CHORD_DIMINISHED_SEVENTH,
+  CHORD_AUGMENTED
+};
+
+// Chord structure
+struct Chord {
+  String name;         // e.g., "C Major", "Am7"
+  int8_t rootNote;     // 0-11 (C-B)
+  int8_t notes[6];     // Up to 6 notes
+  uint8_t noteCount;   // Number of notes in chord
+  ChordType type;      // Chord type
+  int8_t scaleDegree;  // 0-6 (I-vii°)
+
+  // Clear the chord data
+  void clear() {
+    name = "";
+    rootNote = 0;
+    noteCount = 0;
+    type = CHORD_TRIAD;
+    scaleDegree = 0;
+    for (int i = 0; i < 6; i++) notes[i] = 0;
+  }
+};
+
+// Current chord tracking
+Chord currentChord;
+int8_t currentChordDegree = 0;  // 0-6 for I-vii°
+
 ScaleManager scalemanager;
 
 // Scale state variables
@@ -272,7 +314,24 @@ struct Keys {
 
   // Draw key with note name, octave, and interval
   void drawKeys(int8_t keyNo) {
-    // Draw key outline
+    // NEW: Highlight chord notes first (behind other elements)
+    // Inline chord note checking
+    bool noteInChord = false;
+    int8_t normalizedKey = keyNo % 12;
+    for (int i = 0; i < currentChord.noteCount; i++) {
+      if ((currentChord.notes[i] % 12) == normalizedKey) {
+        noteInChord = true;
+        break;
+      }
+    }
+
+    if (noteInChord) {
+    // Draw chord note highlight with orange-50% color
+    keysSpriteBuffer.setColor(PAL_ORANGE_50);
+      keysSpriteBuffer.fillRoundRect(x, y, w, h, 5, PAL_RED);
+    }
+
+    // Draw key outline (this will be on top of highlight)
     keysSpriteBuffer.setColor(this->colourIdle);
     if (whiteKeys[keyNo]) {
       keysSpriteBuffer.drawRoundRect(x, y, w, h, 5);
@@ -693,11 +752,14 @@ void setup() {
   infoSpriteBuffer.pushSprite(&infoSprite, 0, 0);
   keysSpriteBuffer.pushSprite(&keysSprite, 0, 0);
   encsSpriteBuffer.pushSprite(&encsSprite, 0, 0);
-  infoSprite.pushSprite(0, 0);
-  keysSprite.pushSprite(0, 50);
+  keysSprite.pushSprite(0, 53);
+  infoSprite.pushSprite(0, 0);  // draw this on top
   encsSprite.pushSprite(0, 200);
 
   Serial.println("Setup complete");
+
+  // Initialize chord system
+  initChordSystem();
 }
 
 //========================================================================
@@ -782,6 +844,7 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                   }
 
                   setScaleIntervals();
+                  //updateCurrentChord();
                   encoderChanged = true;
                   break;
                 }
@@ -810,6 +873,7 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                   }
 
                   setScaleIntervals();
+                  //updateCurrentChord();
                   updateOctaveNumbers();
                   encoderChanged = true;
                   break;
@@ -904,8 +968,8 @@ void loop() {
     keysSpriteBuffer.pushSprite(&keysSprite, 0, 0);
     encsSpriteBuffer.pushSprite(&encsSprite, 0, 0);
 
-    infoSprite.pushSprite(0, 0);
-    keysSprite.pushSprite(0, 50);
+    keysSprite.pushSprite(0, 53);
+    infoSprite.pushSprite(0, 0);  // draw this on top
     encsSprite.pushSprite(0, 200);
 
     Serial.print("Switch state changed to: ");
@@ -952,6 +1016,100 @@ void loop() {
         encoderChanged = true;
       }
     }
+
+    // Handle Encoder 0 chord selection in switch ON mode
+    if (i == 0 && currentSwitchState) {
+      static int32_t lastEncoder0Value = 60;  // Match startup value
+
+      if (stableValue != lastEncoder0Value) {
+        int32_t delta = (stableValue > lastEncoder0Value) ? 1 : -1;
+        lastEncoder0Value = stableValue;
+
+        static int32_t chordStepAccumulator = 0;
+        chordStepAccumulator += delta;
+
+        // Require 2 steps before changing (reduces sensitivity)
+        if (abs(chordStepAccumulator) >= 2) {
+          int chordChange = chordStepAccumulator / 2;
+          chordStepAccumulator = 0;
+
+          int8_t newDegree = currentChordDegree + chordChange;
+          selectChordByDegree(newDegree);
+          encoderChanged = true;  // Trigger display update
+        }
+      }
+    }
+
+
+    // Handle Encoder 1 chord type selection in switch ON mode
+    if (i == 1 && currentSwitchState) {
+      static int32_t lastEncoder1Value = 60;  // Match startup value
+
+      if (stableValue != lastEncoder1Value) {
+        int32_t delta = (stableValue > lastEncoder1Value) ? 1 : -1;
+        Serial.print("Encoder 1 delta: ");
+        Serial.println(delta);
+        lastEncoder1Value = stableValue;
+
+        static int32_t typeStepAccumulator = 0;
+        typeStepAccumulator += delta;
+
+        // Require 2 steps before changing
+        if (abs(typeStepAccumulator) >= 2) {
+          int typeChange = typeStepAccumulator / 2;
+          typeStepAccumulator = 0;
+
+          // Cycle through chord types
+          int currentTypeIndex = static_cast<int>(currentChord.type);
+          int newTypeIndex = currentTypeIndex + typeChange;
+
+          // Wrap around available types (0-6)
+          if (newTypeIndex > 6) newTypeIndex = 0;
+          if (newTypeIndex < 0) newTypeIndex = 6;
+
+          Serial.print("Chord type change: ");
+          Serial.print(currentTypeIndex);
+          Serial.print(" -> ");
+          Serial.println(newTypeIndex);
+
+          changeChordType(static_cast<ChordType>(newTypeIndex));
+          encoderChanged = true;  // Trigger display update
+        }
+      }
+    }
+
+
+    // // Handle Encoder 1 chord type selection in switch ON mode
+    // if (i == 1 && currentSwitchState) {
+    //   static int32_t lastEncoder1Value = 60;  // Match startup value
+
+    //   if (stableValue != lastEncoder1Value) {
+    //     int32_t delta = (stableValue > lastEncoder1Value) ? 1 : -1;
+    //     lastEncoder1Value = stableValue;
+
+    //     static int32_t typeStepAccumulator = 0;
+    //     typeStepAccumulator += delta;
+
+    //     // Require 2 steps before changing
+    //     if (abs(typeStepAccumulator) >= 2) {
+    //       int typeChange = typeStepAccumulator / 2;
+    //       typeStepAccumulator = 0;
+
+    //       // Cycle through chord types
+    //       int currentTypeIndex = static_cast<int>(currentChord.type);
+    //       int newTypeIndex = currentTypeIndex + typeChange;
+
+    //       // Wrap around available types (0-6)
+    //       if (newTypeIndex > 6) newTypeIndex = 0;
+    //       if (newTypeIndex < 0) newTypeIndex = 6;
+
+    //       changeChordType(static_cast<ChordType>(newTypeIndex));
+    //       encoderChanged = true;  // Trigger display update
+    //     }
+    //   }
+    // }
+
+
 
 
     // ==================================================================
@@ -1011,7 +1169,7 @@ void loop() {
       // Encoder 7: cycle mode on short press release
       if (i == 7) {
         unsigned long pressDuration = millis() - buttonPressStartTime[i];
-        if (pressDuration < 500) {  // Short press cycles mode
+        if (pressDuration < 500) {                                          // Short press cycles mode
           encoder7Mode = static_cast<EncoderMode>((encoder7Mode + 1) % 4);  // 4 modes now
           modeChanged = true;
           Serial.print("Encoder 7 mode changed to: ");
@@ -1104,8 +1262,8 @@ void loop() {
     keysSpriteBuffer.pushSprite(&keysSprite, 0, 0);
     encsSpriteBuffer.pushSprite(&encsSprite, 0, 0);
 
-    infoSprite.pushSprite(0, 0);
-    keysSprite.pushSprite(0, 52);  // Moved down 2px to avoid cutoff of info sprite
+    keysSprite.pushSprite(0, 53);  // Moved down 5px to avoid cutoff of info sprite
+    infoSprite.pushSprite(0, 0);   // draw this on top
     encsSprite.pushSprite(0, 200);
 
     // Reset modeChanged flag after handling
@@ -1121,7 +1279,7 @@ void loop() {
 bool initializeSprites() {
   // Info sprite (top bar with scale info)
   infoSprite.setColorDepth(4);
-  if (!infoSprite.createSprite(320, 52)) return false;
+  if (!infoSprite.createSprite(320, 55)) return false;
   infoSprite.setPaletteColor(0, 0x0001);  // Transparent
   infoSprite.setPaletteColor(1, 0xffff);  // White
   infoSprite.setPaletteColor(2, 0x0000);  // Black
@@ -1132,12 +1290,13 @@ bool initializeSprites() {
   infoSprite.setPaletteColor(7, 0x7e0);   // Green
   infoSprite.setPaletteColor(8, 0x00ff);  // Blue
   infoSprite.setPaletteColor(9, 0xfd20);  // Orange
+  infoSprite.setPaletteColor(10, 0xC400); // Orange 50%
   infoSprite.setFont(&DIN_Condensed_Bold30pt7b);
   infoSprite.fillSprite(0);
 
   // Keys sprite (piano keyboard display)
   keysSprite.setColorDepth(4);
-  if (!keysSprite.createSprite(320, 150)) return false;
+  if (!keysSprite.createSprite(320, 145)) return false;
   keysSprite.setPaletteColor(0, 0x0001);
   keysSprite.setPaletteColor(1, 0xffff);
   keysSprite.setPaletteColor(2, 0x0000);
@@ -1148,6 +1307,7 @@ bool initializeSprites() {
   keysSprite.setPaletteColor(7, 0x7e0);
   keysSprite.setPaletteColor(8, 0x00ff);
   keysSprite.setPaletteColor(9, 0xfd20);
+  keysSprite.setPaletteColor(10, 0xC400); // Orange 50%
   keysSprite.setFont(&DIN_Condensed_Bold30pt7b);
   keysSprite.fillSprite(0);
 
@@ -1164,12 +1324,13 @@ bool initializeSprites() {
   encsSprite.setPaletteColor(7, 0x7e0);
   encsSprite.setPaletteColor(8, 0x00ff);
   encsSprite.setPaletteColor(9, 0xfd20);
+  encsSprite.setPaletteColor(10, 0xC400);
   encsSprite.setFont(&DIN_Condensed_Bold30pt7b);
   encsSprite.fillSprite(0);
 
   // Initialize buffer sprites (same configuration as main sprites)
   infoSpriteBuffer.setColorDepth(4);
-  if (!infoSpriteBuffer.createSprite(320, 52)) return false;
+  if (!infoSpriteBuffer.createSprite(320, 55)) return false;
   infoSpriteBuffer.setPaletteColor(0, 0x0001);
   infoSpriteBuffer.setPaletteColor(1, 0xffff);
   infoSpriteBuffer.setPaletteColor(2, 0x0000);
@@ -1180,11 +1341,12 @@ bool initializeSprites() {
   infoSpriteBuffer.setPaletteColor(7, 0x7e0);
   infoSpriteBuffer.setPaletteColor(8, 0x00ff);
   infoSpriteBuffer.setPaletteColor(9, 0xfd20);
+  infoSpriteBuffer.setPaletteColor(10, 0xC400);
   infoSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   infoSpriteBuffer.fillSprite(0);
 
   keysSpriteBuffer.setColorDepth(4);
-  if (!keysSpriteBuffer.createSprite(320, 150)) return false;
+  if (!keysSpriteBuffer.createSprite(320, 145)) return false;
   keysSpriteBuffer.setPaletteColor(0, 0x0001);
   keysSpriteBuffer.setPaletteColor(1, 0xffff);
   keysSpriteBuffer.setPaletteColor(2, 0x0000);
@@ -1195,6 +1357,7 @@ bool initializeSprites() {
   keysSpriteBuffer.setPaletteColor(7, 0x7e0);
   keysSpriteBuffer.setPaletteColor(8, 0x00ff);
   keysSpriteBuffer.setPaletteColor(9, 0xfd20);
+  keysSpriteBuffer.setPaletteColor(10, 0xC400);
   keysSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   keysSpriteBuffer.fillSprite(0);
 
@@ -1210,6 +1373,7 @@ bool initializeSprites() {
   encsSpriteBuffer.setPaletteColor(7, 0x7e0);
   encsSpriteBuffer.setPaletteColor(8, 0x00ff);
   encsSpriteBuffer.setPaletteColor(9, 0xfd20);
+  encsSpriteBuffer.setPaletteColor(10, 0xC400);
   encsSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   encsSpriteBuffer.fillSprite(0);
 
@@ -1225,12 +1389,8 @@ void drawInfoArea() {
   bool hideScale = (encoder7Mode == MODE_SCALE && !flashState);
 
   // Calculate bounding box for scale info
-  int boxWidth = 176;  // Fixed width to properly contain all scale names
-  int boxHeight = 52;  // Original 50 + 2px
-  
-  // Draw rounded rectangle outline around all labels
-  infoSpriteBuffer.setColor(PAL_WHITE);
-  infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
+  int boxWidth = 177;  // Fixed width to properly contain all scale names
+  int boxHeight = 53;  // Original 50 + 3px
 
   // Draw root note name (without octave number) - shifted 3px down and right
   infoSpriteBuffer.setTextSize(0.55);
@@ -1261,33 +1421,220 @@ void drawInfoArea() {
   // Draw interval formula - shifted 3px down and right
   infoSpriteBuffer.setTextSize(0.35);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
-  infoSpriteBuffer.setCursor(3, 33);
-  infoSpriteBuffer.setTextColor(PAL_WHITE);
+  infoSpriteBuffer.setCursor(4, 33);
+  infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
   infoSpriteBuffer.printf(intvlFormula[scaleNo]);
 
-  // Serial.print("Drawing info - Root: ");
-  // Serial.print(rootName);
-  // Serial.print(", Scale: ");
-  // Serial.print(cachedScaleName);
-  // Serial.print(", Formula: ");
-  // Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
+  // Draw rounded rectangle outline around all labels
+  infoSpriteBuffer.setColor(PAL_WHITE);
+  infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
 
-  // Add mode indicator when switch is ON
-  if (currentSwitchState) {
+  // ==================================================================
+  // IMPROVED CHORD DISPLAY
+  // ==================================================================
+  int chordAreaX = 185;      // Position to the right of the scale info area
+  int chordAreaWidth = 130;  // Width for chord display
+
+  // Draw chord area background
+  infoSpriteBuffer.setColor(PAL_DARKGREY);
+  infoSpriteBuffer.fillRect(chordAreaX, 2, chordAreaWidth, boxHeight - 4, PAL_DARKGREY);
+  infoSpriteBuffer.setColor(PAL_WHITE);
+  infoSpriteBuffer.drawRect(chordAreaX, 2, chordAreaWidth, boxHeight - 4, PAL_WHITE);
+
+  // Roman numerals for chord degrees
+  const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
+  const char* noteNamesSimple[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+  const char* chordTypeNames[] = { "", "7", "m", "m7", "°", "°7", "+" };  // Match ChordType enum
+
+  if (currentChord.name.length() > 0) {
+    // Get root note name
+    int rootIndex = currentChord.rootNote % 12;
+    String rootNoteName = String(noteNamesSimple[rootIndex]);
+
+    // Display chord name: "I: C " or "I: Cm " or "I: C7 "
+    infoSpriteBuffer.setTextSize(0.45);
+    infoSpriteBuffer.setTextDatum(TL_DATUM);  // Top Left
+    infoSpriteBuffer.setCursor(chordAreaX + 5, 5);
+    infoSpriteBuffer.setTextColor(PAL_WHITE);
+
+    String chordName = String(romanNumerals[currentChordDegree]) + ": " + rootNoteName + String(chordTypeNames[static_cast<int>(currentChord.type)]) + " ";
+    infoSpriteBuffer.printf("%s", chordName.c_str());
+
+    // Build and display notes string
+    String notesStr = "";
+    for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
+      int noteIndex = currentChord.notes[i] % 12;
+      notesStr += String(noteNamesSimple[noteIndex]);
+      if (i < currentChord.noteCount - 1) notesStr += "-";
+    }
+
+    // // Display notes right-aligned within chord area
+    // infoSpriteBuffer.setTextSize(0.45);
+    // infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top Right
+    // infoSpriteBuffer.setCursor(chordAreaX + chordAreaWidth - 3, 5);  // 3px from right edge
+    // infoSpriteBuffer.printf("%s", notesStr.c_str());
+
+    // Fixed position for notes (experiment with this value)
+    infoSpriteBuffer.setCursor(chordAreaX + 60, 5);  // Try different X positions
+    infoSpriteBuffer.printf("%s", notesStr.c_str());
+
+    // Display intervals
     infoSpriteBuffer.setTextSize(0.35);
-    infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top right
-    infoSpriteBuffer.setCursor(310, 5);
+    infoSpriteBuffer.setTextDatum(TL_DATUM);  // Top Left
+    infoSpriteBuffer.setCursor(chordAreaX + 5, 25);
     infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
 
-    String modeText = "MODE: ";
-    switch (encoder7Mode) {
-      case MODE_SCALE: modeText += "SCALE"; break;
-      case MODE_ROOT: modeText += "ROOT"; break;
-      case MODE_OCTAVE: modeText += "OCTAVE"; break;
+    // Short interval descriptions
+    String structureStr = "";
+    switch (currentChord.type) {
+      case CHORD_TRIAD:
+        structureStr = "R,Maj3,P5";
+        break;
+      case CHORD_MINOR_TRIAD:
+        structureStr = "R,Min3,P5";
+        break;
+      case CHORD_DIMINISHED:
+        structureStr = "R,Min3,Dim5";
+        break;
+      case CHORD_AUGMENTED:
+        structureStr = "R,Maj3,Aug5";
+        break;
+      case CHORD_SEVENTH:
+        structureStr = "R,Maj3,P5,Maj7";
+        break;
+      case CHORD_MINOR_SEVENTH:
+        structureStr = "R,Min3,P5,Min7";
+        break;
+      case CHORD_DIMINISHED_SEVENTH:
+        structureStr = "R,Min3,Dim5,Dim7";
+        break;
+      default:
+        structureStr = "R,Maj3,P5";
+        break;
     }
-    infoSpriteBuffer.printf(modeText.c_str());
+
+    infoSpriteBuffer.printf("%s", structureStr.c_str());
+  } else {
+    // No chord case
+    infoSpriteBuffer.setTextSize(0.45);
+    infoSpriteBuffer.setTextDatum(TL_DATUM);
+    infoSpriteBuffer.setCursor(chordAreaX + 5, 5);
+    infoSpriteBuffer.setTextColor(PAL_WHITE);
+    infoSpriteBuffer.printf("%s: No chord", romanNumerals[currentChordDegree]);
   }
+
+
+
+
+
+
+
+  // // Draw chord info with Roman numerals and note names
+  // infoSpriteBuffer.setTextSize(0.45);
+  // infoSpriteBuffer.setTextDatum(TL_DATUM);
+  // infoSpriteBuffer.setCursor(chordAreaX + 5, 5);
+  // infoSpriteBuffer.setTextColor(PAL_WHITE);
+
+  // // Roman numerals for chord degrees
+  // const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
+
+  // if (currentChord.name.length() > 0) {
+  //   // Display chord with Roman numeral
+  //   String chordDisplay = String(romanNumerals[currentChordDegree]) + ": " + currentChord.name;
+  //   infoSpriteBuffer.printf("%s", chordDisplay.c_str());
+
+  //   // Draw chord notes on second line
+  //   infoSpriteBuffer.setTextSize(0.35);
+  //   infoSpriteBuffer.setCursor(chordAreaX + 5, 25);
+  //   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+
+  //   // Simple note names (avoiding function calls)
+  //   const char* noteNamesSimple[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+  //   String notesStr = "";
+  //   for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
+  //     int noteIndex = currentChord.notes[i] % 12;
+  //     notesStr += String(noteNamesSimple[noteIndex]);
+  //     if (i < currentChord.noteCount - 1) notesStr += " ";
+  //   }
+  //   infoSpriteBuffer.printf("%s", notesStr.c_str());
+  // } else {
+  //   infoSpriteBuffer.printf("%s: %s", romanNumerals[currentChordDegree], "No chord");
+  // }
 }
+
+
+// // Draw the top info area showing current scale/root/formula
+// void drawInfoArea() {
+//   // Note: sprite is already cleared by caller before drawInfoArea()
+
+//   // Determine if we should flash (hide) based on mode
+//   bool hideRoot = (encoder7Mode == MODE_ROOT && !flashState);
+//   bool hideScale = (encoder7Mode == MODE_SCALE && !flashState);
+
+//   // Calculate bounding box for scale info
+//   int boxWidth = 177;  // Fixed width to properly contain all scale names
+//   int boxHeight = 53;  // Original 50 + 3px
+
+//   // Draw root note name (without octave number) - shifted 3px down and right
+//   infoSpriteBuffer.setTextSize(0.55);
+//   infoSpriteBuffer.setTextDatum(TL_DATUM);
+//   infoSpriteBuffer.setCursor(3, 3);
+//   if (hideRoot) {
+//     infoSpriteBuffer.setTextColor(PAL_MEDGREY);
+//   } else {
+//     infoSpriteBuffer.setTextColor(PAL_WHITE);
+//   }
+//   String rootName = cachedRootName;
+//   if (rootName.endsWith("-")) {
+//     rootName = rootName.substring(0, rootName.length() - 1);
+//   }
+//   infoSpriteBuffer.printf(rootName.c_str());
+
+//   // Draw scale name - shifted 3px down and right
+//   infoSpriteBuffer.setTextSize(0.4);
+//   infoSpriteBuffer.setTextDatum(TL_DATUM);
+//   infoSpriteBuffer.setCursor(30, 8);
+//   if (hideScale) {
+//     infoSpriteBuffer.setTextColor(PAL_MEDGREY);
+//   } else {
+//     infoSpriteBuffer.setTextColor(PAL_WHITE);
+//   }
+//   infoSpriteBuffer.printf(cachedScaleName.c_str());
+
+//   // Draw interval formula - shifted 3px down and right
+//   infoSpriteBuffer.setTextSize(0.35);
+//   infoSpriteBuffer.setTextDatum(TL_DATUM);
+//   infoSpriteBuffer.setCursor(4, 33);
+//   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+//   infoSpriteBuffer.printf(intvlFormula[scaleNo]);
+
+//   // Draw rounded rectangle outline around all labels
+//   infoSpriteBuffer.setColor(PAL_WHITE);
+//   infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
+
+//   // Serial.print("Drawing info - Root: ");
+//   // Serial.print(rootName);
+//   // Serial.print(", Scale: ");
+//   // Serial.print(cachedScaleName);
+//   // Serial.print(", Formula: ");
+//   // Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
+
+//   // // Add mode indicator when switch is ON
+//   // if (currentSwitchState) {
+//   //   infoSpriteBuffer.setTextSize(0.35);
+//   //   infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top right
+//   //   infoSpriteBuffer.setCursor(310, 5);
+//   //   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+
+//   //   String modeText = "MODE: ";
+//   //   switch (encoder7Mode) {
+//   //     case MODE_SCALE: modeText += "SCALE"; break;
+//   //     case MODE_ROOT: modeText += "ROOT"; break;
+//   //     case MODE_OCTAVE: modeText += "OCTAVE"; break;
+//   //   }
+//   //   infoSpriteBuffer.printf(modeText.c_str());
+//   // }
+// }
 
 // Draw the toggle switch indicator
 void drawSwitchIndicator(bool isOn) {
@@ -1469,5 +1816,339 @@ bool isValueStable(int32_t newValue, uint8_t encoderIndex) {
     }
   }
 
+  return false;
+}
+
+//========================================================================
+// CHORD GENERATION FUNCTIONS
+//========================================================================
+
+// Get chord name based on root note and type
+String getChordName(int8_t rootNote, ChordType type) {
+  String rootName = getNoteName(rootNote);
+
+  switch (type) {
+    case CHORD_TRIAD: return rootName + " ";                 // Major triad
+    case CHORD_MINOR_TRIAD: return rootName + "m ";          // Minor triad
+    case CHORD_SEVENTH: return rootName + "7 ";              // Major 7th
+    case CHORD_MINOR_SEVENTH: return rootName + "m7 ";       // Minor 7th
+    case CHORD_DIMINISHED: return rootName + "° ";           // Diminished
+    case CHORD_DIMINISHED_SEVENTH: return rootName + "°7 ";  // Diminished 7th
+    case CHORD_AUGMENTED: return rootName + "+ ";            // Augmented
+    default: return rootName + " ";
+  }
+}
+
+
+// Generate chord based on scale degree and respect selected type
+void generateChordForDegree(int8_t degree) {
+  if (degree < 0 || degree > 6) return;
+
+  // Preserve the current type before clearing
+  ChordType preservedType = currentChord.type;
+
+  currentChord.clear();
+  currentChordDegree = degree;
+  currentChord.type = preservedType;  // Restore the type after clear!
+
+  // Get the root note from scale
+  int8_t scaleRoot = scalemanager.getScaleNote(degree);
+  int8_t absoluteRoot = (scaleRoot + fundamental) % 12;
+  currentChord.rootNote = absoluteRoot;
+
+  // Use the preserved chord type
+  ChordType chordType = currentChord.type;
+
+  // Build the chord notes based on chord type (proper intervals)
+  switch (chordType) {
+    case CHORD_TRIAD:                                   // Major triad: R, M3, P5
+      currentChord.notes[0] = absoluteRoot;             // Root
+      currentChord.notes[1] = (absoluteRoot + 4) % 12;  // Major 3rd
+      currentChord.notes[2] = (absoluteRoot + 7) % 12;  // Perfect 5th
+      currentChord.noteCount = 3;
+      break;
+
+    case CHORD_MINOR_TRIAD:                             // Minor triad: R, m3, P5
+      currentChord.notes[0] = absoluteRoot;             // Root
+      currentChord.notes[1] = (absoluteRoot + 3) % 12;  // Minor 3rd
+      currentChord.notes[2] = (absoluteRoot + 7) % 12;  // Perfect 5th
+      currentChord.noteCount = 3;
+      break;
+
+    case CHORD_DIMINISHED:                              // Diminished triad: R, m3, d5
+      currentChord.notes[0] = absoluteRoot;             // Root
+      currentChord.notes[1] = (absoluteRoot + 3) % 12;  // Minor 3rd
+      currentChord.notes[2] = (absoluteRoot + 6) % 12;  // Diminished 5th
+      currentChord.noteCount = 3;
+      break;
+
+    case CHORD_AUGMENTED:                               // Augmented triad: R, M3, A5
+      currentChord.notes[0] = absoluteRoot;             // Root
+      currentChord.notes[1] = (absoluteRoot + 4) % 12;  // Major 3rd
+      currentChord.notes[2] = (absoluteRoot + 8) % 12;  // Augmented 5th
+      currentChord.noteCount = 3;
+      break;
+
+    case CHORD_SEVENTH:                                  // Major 7th: R, M3, P5, M7
+      currentChord.notes[0] = absoluteRoot;              // Root
+      currentChord.notes[1] = (absoluteRoot + 4) % 12;   // Major 3rd
+      currentChord.notes[2] = (absoluteRoot + 7) % 12;   // Perfect 5th
+      currentChord.notes[3] = (absoluteRoot + 11) % 12;  // Major 7th
+      currentChord.noteCount = 4;
+      break;
+
+    case CHORD_MINOR_SEVENTH:                            // Minor 7th: R, m3, P5, m7
+      currentChord.notes[0] = absoluteRoot;              // Root
+      currentChord.notes[1] = (absoluteRoot + 3) % 12;   // Minor 3rd
+      currentChord.notes[2] = (absoluteRoot + 7) % 12;   // Perfect 5th
+      currentChord.notes[3] = (absoluteRoot + 10) % 12;  // Minor 7th
+      currentChord.noteCount = 4;
+      break;
+
+    case CHORD_DIMINISHED_SEVENTH:                      // Diminished 7th: R, m3, d5, d7
+      currentChord.notes[0] = absoluteRoot;             // Root
+      currentChord.notes[1] = (absoluteRoot + 3) % 12;  // Minor 3rd
+      currentChord.notes[2] = (absoluteRoot + 6) % 12;  // Diminished 5th
+      currentChord.notes[3] = (absoluteRoot + 9) % 12;  // Diminished 7th
+      currentChord.noteCount = 4;
+      break;
+  }
+
+  // Generate chord name with correct type
+  currentChord.name = getChordName(absoluteRoot, chordType);
+
+  Serial.print("Generated chord: ");
+  Serial.print(currentChord.name);
+  Serial.print(" (Degree ");
+  Serial.print(degree);
+  Serial.print(", Type ");
+  Serial.print(static_cast<int>(chordType));
+  Serial.print(") Notes: ");
+  for (int i = 0; i < currentChord.noteCount; i++) {
+    Serial.print(getNoteName(currentChord.notes[i]));
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+
+
+
+// // Generate chord based on scale degree
+// void generateChordForDegree(int8_t degree) {
+//   if (degree < 0 || degree > 6) return;
+
+//   currentChord.clear();
+//   currentChordDegree = degree;
+
+//   // Get the root note from scale
+//   int8_t scaleRoot = scalemanager.getScaleNote(degree);
+//   int8_t absoluteRoot = (scaleRoot + fundamental) % 12;
+//   currentChord.rootNote = absoluteRoot;
+
+//   // Determine chord quality based on scale degree
+//   ChordType chordType;
+//   switch (degree) {
+//     case 0:  // I - Major
+//       chordType = CHORD_TRIAD;
+//       break;
+//     case 1:  // ii - Minor
+//     case 2:  // iii - Minor
+//     case 5:  // vi - Minor
+//       chordType = CHORD_MINOR_TRIAD;
+//       break;
+//     case 3:  // IV - Major
+//       chordType = CHORD_TRIAD;
+//       break;
+//     case 4:  // V - Major
+//       chordType = CHORD_TRIAD;
+//       break;
+//     case 6:  // vii° - Diminished
+//       chordType = CHORD_DIMINISHED;
+//       break;
+//     default:
+//       chordType = CHORD_TRIAD;
+//       break;
+//   }
+
+//   currentChord.type = chordType;
+//   currentChord.scaleDegree = degree;
+
+//   // Build the chord notes
+//   switch (chordType) {
+//     case CHORD_TRIAD:
+//     case CHORD_MINOR_TRIAD:
+//     case CHORD_DIMINISHED:
+//     case CHORD_AUGMENTED:
+//       currentChord.notes[0] = absoluteRoot;
+//       currentChord.notes[1] = (scalemanager.getScaleNote((degree + 2) % 7) + fundamental) % 12;
+//       currentChord.notes[2] = (scalemanager.getScaleNote((degree + 4) % 7) + fundamental) % 12;
+//       currentChord.noteCount = 3;
+//       break;
+
+//     case CHORD_SEVENTH:
+//     case CHORD_MINOR_SEVENTH:
+//     case CHORD_DIMINISHED_SEVENTH:
+//       currentChord.notes[0] = absoluteRoot;
+//       currentChord.notes[1] = (scalemanager.getScaleNote((degree + 2) % 7) + fundamental) % 12;
+//       currentChord.notes[2] = (scalemanager.getScaleNote((degree + 4) % 7) + fundamental) % 12;
+//       currentChord.notes[3] = (scalemanager.getScaleNote((degree + 6) % 7) + fundamental) % 12;
+//       currentChord.noteCount = 4;
+//       break;
+//   }
+
+//   // Generate chord name
+//   currentChord.name = getChordName(absoluteRoot, chordType);
+
+//   Serial.print("Generated chord: ");
+//   Serial.print(currentChord.name);
+//   Serial.print(" (Degree ");
+//   Serial.print(degree);
+//   Serial.print(") Notes: ");
+//   for (int i = 0; i < currentChord.noteCount; i++) {
+//     Serial.print(getNoteName(currentChord.notes[i]));
+//     Serial.print(" ");
+//   }
+//   Serial.println();
+// }
+
+
+
+
+// Initialize with I chord
+void initChordSystem() {
+  generateChordForDegree(0);  // Start with I chord
+}
+
+// Update the current chord when scale/root changes
+void updateCurrentChord() {
+  generateChordForDegree(currentChordDegree);  // Regenerate with current degree
+}
+
+// Simple chord display function that avoids linking issues
+void displayCurrentChordSimple() {
+  // This function just prepares data for display - doesn't call other functions
+  // The actual drawing will be done in drawInfoArea
+}
+
+// Function to get Roman numeral for chord degree (self-contained)
+String getRomanNumeral(int degree) {
+  const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
+  if (degree >= 0 && degree < 7) {
+    return String(romanNumerals[degree]);
+  }
+  return String(degree);
+}
+
+// Function to select chord by degree
+void selectChordByDegree(int8_t degree) {
+  if (degree < 0) degree = 6;  // Wrap to vii°
+  if (degree > 6) degree = 0;  // Wrap to I
+
+  currentChordDegree = degree;
+  generateChordForDegree(degree);
+  Serial.print("Selected chord degree: ");
+  Serial.println(degree);
+}
+
+// Function to change chord type
+void changeChordType(ChordType newType) {
+  Serial.print("Changing chord type from ");
+  Serial.print(static_cast<int>(currentChord.type));
+  Serial.print(" to ");
+  Serial.println(static_cast<int>(newType));
+
+  currentChord.type = newType;
+  generateChordForDegree(currentChordDegree);  // Regenerate with new type
+
+  Serial.print("After regeneration, type is: ");
+  Serial.println(static_cast<int>(currentChord.type));
+}
+
+// call via
+//String numberIntervals = getChordIntervalsAsNumbers();
+// Returns "0,4,7" for major triad, "0,3,7" for minor triad, etc.
+
+
+// Get integer-based interval representation (semitones from root)
+String getChordIntervalsAsNumbers() {
+  String intervalsStr = "";
+
+  switch (currentChord.type) {
+    case CHORD_TRIAD:
+      intervalsStr = "0,4,7";  // R, M3, P5
+      break;
+    case CHORD_MINOR_TRIAD:
+      intervalsStr = "0,3,7";  // R, m3, P5
+      break;
+    case CHORD_DIMINISHED:
+      intervalsStr = "0,3,6";  // R, m3, dim5
+      break;
+    case CHORD_AUGMENTED:
+      intervalsStr = "0,4,8";  // R, M3, aug5
+      break;
+    case CHORD_SEVENTH:
+      intervalsStr = "0,4,7,11";  // R, M3, P5, M7
+      break;
+    case CHORD_MINOR_SEVENTH:
+      intervalsStr = "0,3,7,10";  // R, m3, P5, m7
+      break;
+    case CHORD_DIMINISHED_SEVENTH:
+      intervalsStr = "0,3,6,9";  // R, m3, dim5, dim7
+      break;
+    default:
+      intervalsStr = "0,4,7";  // Default to major triad
+      break;
+  }
+
+  return intervalsStr;
+}
+
+// call via
+//String numberIntervals = getChordIntervalsAsSteps();
+// Returns "0,4,3" for major triad, "0,3,4" for minor triad, etc.
+
+// Get intervalic representation (semitones between consecutive notes)
+String getChordIntervalsAsSteps() {
+  String stepsStr = "";
+
+  switch (currentChord.type) {
+    case CHORD_TRIAD:
+      stepsStr = "0,4,3";  // R, +4 (M3), +3 (P5 from M3)
+      break;
+    case CHORD_MINOR_TRIAD:
+      stepsStr = "0,3,4";  // R, +3 (m3), +4 (P5 from m3)
+      break;
+    case CHORD_DIMINISHED:
+      stepsStr = "0,3,3";  // R, +3 (m3), +3 (dim5 from m3)
+      break;
+    case CHORD_AUGMENTED:
+      stepsStr = "0,4,4";  // R, +4 (M3), +4 (aug5 from M3)
+      break;
+    case CHORD_SEVENTH:
+      stepsStr = "0,4,3,4";  // R, +4 (M3), +3 (P5), +4 (M7 from P5)
+      break;
+    case CHORD_MINOR_SEVENTH:
+      stepsStr = "0,3,4,3";  // R, +3 (m3), +4 (P5), +3 (m7 from P5)
+      break;
+    case CHORD_DIMINISHED_SEVENTH:
+      stepsStr = "0,3,3,3";  // R, +3 (m3), +3 (dim5), +3 (dim7 from dim5)
+      break;
+    default:
+      stepsStr = "0,4,3";  // Default to major triad
+      break;
+  }
+
+  return stepsStr;
+}
+
+// Check if a given note (0-11) is in the current chord
+bool isNoteInCurrentChord(int8_t note) {
+  note = note % 12;  // Normalize to 0-11
+
+  for (int i = 0; i < currentChord.noteCount; i++) {
+    if ((currentChord.notes[i] % 12) == note) {
+      return true;
+    }
+  }
   return false;
 }
