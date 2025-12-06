@@ -1,5 +1,5 @@
 M5Stack CoreS3 UNIT_8ENCODER BLE MIDI Controller
-State of Play - 2025-12-04 19:46 UTC
+State of Play - 2025-12-06 16:36 UTC
 
 === COMPLETED FEATURES ===
 
@@ -68,6 +68,15 @@ State of Play - 2025-12-04 19:46 UTC
    - Rounded rectangle outline (176px × 52px) around all labels
    - Info sprite height: 52px (increased from 50px)
    - Keys sprite position: Y=52 (moved down to prevent cutoff)
+
+9. Chord Mode Fixes & Display Tweaks (2025-12-06 16:36 UTC)
+   - Fixed chord root calculation (no double fundamental)
+   - Chord updates on scale/root change (re-enabled updateCurrentChord)
+   - Scale intervals always shown; mid-grey in chord mode, root interval green
+   - Added per-note chord step intervals (e.g., C chord: 0,4,3)
+   - Hid velocity bars in chord mode
+   - Corrected note label coloring (drawn in keys sprite)
+   - Stabilized octave display using octaveNo and consistent flashing logic
 
 === PENDING FEATURES ===
 

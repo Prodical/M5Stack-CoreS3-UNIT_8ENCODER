@@ -396,12 +396,12 @@ struct Keys {
 
     if (noteInCurrentSet) {
       if (isCurrentRoot) {
-        infoSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
+        keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
       } else {
-        infoSpriteBuffer.setTextColor(PAL_WHITE);  // White for notes in current set
+        keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for notes in current set
       }
     } else {
-      infoSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for notes not in current set
+      keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for notes not in current set
     }
 
 
@@ -409,7 +409,7 @@ struct Keys {
     keysSpriteBuffer.printf(this->keyNoteName.c_str());
 
     // Draw octave number (flash between white/green and mid grey in MODE_OCTAVE)
-    bool hideOctave = (encoder7Mode == MODE_OCTAVE && !flashState && this->inScale);
+    bool hideOctave = (encoder7Mode == MODE_OCTAVE && !flashState && noteInCurrentSet);
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 15);
 
@@ -427,7 +427,7 @@ struct Keys {
     //   keysSpriteBuffer.printf("-");
     // }
 
-        if (noteInCurrentSet) {
+    if (noteInCurrentSet) {
       if (hideOctave) {
         keysSpriteBuffer.setTextColor(PAL_MEDGREY);
       } else if (isCurrentRoot) {
@@ -435,23 +435,50 @@ struct Keys {
       } else {
         keysSpriteBuffer.setTextColor(PAL_WHITE);
       }
-      keysSpriteBuffer.printf(this->octaveS.c_str());
+      keysSpriteBuffer.printf("%d", this->octaveNo);
     } else {
       keysSpriteBuffer.setTextColor(PAL_DARKGREY);
       keysSpriteBuffer.printf("-");
     }
 
 
-    // Draw interval number only in SCALE_STATE (semitones from previous scale note)
-    if (currentMode == SCALE_STATE) {
-      keysSpriteBuffer.setTextSize(0.35);
-      keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
-      keysSpriteBuffer.setTextColor(PAL_WHITE);
-      keysSpriteBuffer.printf(this->intervalS.c_str());
+    // Draw scale interval number (semitones from previous scale note) - always shown
+    keysSpriteBuffer.setTextSize(0.35);
+    keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
+    // Green for scale root, white/mid-grey for others
+    if (this->isFundamental) {
+      keysSpriteBuffer.setTextColor(PAL_GREEN);
+    } else {
+      keysSpriteBuffer.setTextColor(currentMode == SCALE_STATE ? PAL_WHITE : PAL_MEDGREY);
+    }
+    keysSpriteBuffer.printf(this->intervalS.c_str());
+
+    // Draw chord interval in CHORD_STATE (step from previous chord note)
+    if (currentMode == CHORD_STATE && noteInChord) {
+      // Find step from previous note in chord
+      int8_t chordStep = -1;
+      for (int i = 0; i < currentChord.noteCount; i++) {
+        if ((currentChord.notes[i] % 12) == normalizedKey) {
+          if (i == 0) {
+            chordStep = 0;  // Root is always 0
+          } else {
+            // Step = semitones from previous chord note
+            chordStep = (currentChord.notes[i] - currentChord.notes[i-1] + 12) % 12;
+          }
+          break;
+        }
+      }
+      
+      if (chordStep >= 0) {
+        keysSpriteBuffer.setTextSize(0.35);
+        keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 35);
+        keysSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+        keysSpriteBuffer.printf("%d", chordStep);
+      }
     }
 
-    // Draw velocity bar if this key is in scale
-    if (this->inScale) {
+    // Draw velocity bar if this key is in scale (only in SCALE_STATE)
+    if (currentMode == SCALE_STATE && this->inScale) {
       // Find which encoder index (0-6) this scale note corresponds to
       int encoderIdx = -1;
       for (int j = 0; j < 7; j++) {
@@ -904,7 +931,7 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                   }
 
                   setScaleIntervals();
-                  //updateCurrentChord();
+                  updateCurrentChord();
                   encoderChanged = true;
                   break;
                 }
@@ -933,7 +960,7 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                   }
 
                   setScaleIntervals();
-                  //updateCurrentChord();
+                  updateCurrentChord();
                   updateOctaveNumbers();
                   encoderChanged = true;
                   break;
@@ -1927,7 +1954,8 @@ void generateChordForDegree(int8_t degree) {
 
   // Get the root note from scale
   int8_t scaleRoot = scalemanager.getScaleNote(degree);
-  int8_t absoluteRoot = (scaleRoot + fundamental) % 12;
+  // scaleRoot already includes the fundamental offset, don't add it again
+  int8_t absoluteRoot = scaleRoot % 12;
   currentChord.rootNote = absoluteRoot;
 
   // Use the preserved chord type
