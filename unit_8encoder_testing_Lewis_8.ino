@@ -62,7 +62,7 @@ const uint16_t COLOR_RED = 0xf800;
 const uint16_t COLOR_GREEN = 0x7e0;
 const uint16_t COLOR_BLUE = 0x00ff;
 const uint16_t COLOR_ORANGE = 0xfd20;
-const uint16_t COLOR_ORANGE_50 = 0xC400;
+const uint16_t COLOR_RED_40 = 0x6000;
 
 // LED color constants for encoder hardware LEDs
 const uint32_t LED_COLOR_OFF = 0x000000;
@@ -80,7 +80,7 @@ const uint8_t PAL_RED = 6;
 const uint8_t PAL_GREEN = 7;
 const uint8_t PAL_BLUE = 8;
 const uint8_t PAL_ORANGE = 9;
-const uint8_t PAL_ORANGE_50 = 10;
+const uint8_t PAL_RED_40 = 10;
 
 //========================================================================
 // BLE MIDI CONFIGURATION
@@ -120,7 +120,14 @@ enum EncoderMode {
 EncoderMode encoder7Mode = MODE_DEFAULT;
 bool modeChanged = true;  // Force initial display update
 
+enum SystemMode {
+  SCALE_STATE = 0,
+  CHORD_STATE = 1
+};
+
 static bool encoder7ButtonWasPressed = false;
+SystemMode currentMode = SCALE_STATE;  // Track current system mode
+
 static unsigned long encoder7ButtonPressTime = 0;
 static bool encoder7ModeChangePending = false;
 
@@ -325,10 +332,10 @@ struct Keys {
       }
     }
 
-    if (noteInChord) {
-    // Draw chord note highlight with orange-50% color
-    keysSpriteBuffer.setColor(PAL_ORANGE_50);
-      keysSpriteBuffer.fillRoundRect(x, y, w, h, 5, PAL_RED);
+    if (noteInChord && currentMode == CHORD_STATE) {
+      // Draw chord note highlight with orange-50% color
+      keysSpriteBuffer.setColor(PAL_RED_40);
+      keysSpriteBuffer.fillRoundRect(x, y, w, h, 5, PAL_RED_40);
     }
 
     // Draw key outline (this will be on top of highlight)
@@ -353,16 +360,52 @@ struct Keys {
       keysSpriteBuffer.setCursor(this->x + w / 2 - 8, this->y + h - 35);
     }
 
-    // Color: green for root, white for in-scale, grey for out-of-scale
-    if (this->inScale) {
-      if (this->isFundamental) {
-        keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
+    // // Color: green for root, white for in-scale, grey for out-of-scale
+    // if (this->inScale) {
+    //   if (this->isFundamental) {
+    //     keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
+    //   } else {
+    //     keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for scale notes
+    //   }
+    // } else {
+    //   keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for non-scale notes
+    // }
+
+    // Color: green for root, white for in-scale/chord, grey for out-of-scale/chord
+    bool noteInCurrentSet;
+    bool isCurrentRoot;
+
+    if (currentMode == SCALE_STATE) {
+      // Use scale-based highlighting
+      noteInCurrentSet = this->inScale;
+      isCurrentRoot = this->isFundamental;
+    } else {
+      // Use chord-based highlighting
+      noteInCurrentSet = false;
+      isCurrentRoot = false;
+      for (int i = 0; i < currentChord.noteCount; i++) {
+        if ((currentChord.notes[i] % 12) == keyNo) {
+          noteInCurrentSet = true;
+          if (keyNo == currentChord.rootNote % 12) {
+            isCurrentRoot = true;
+          }
+          break;
+        }
+      }
+    }
+
+    if (noteInCurrentSet) {
+      if (isCurrentRoot) {
+        infoSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
       } else {
-        keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for scale notes
+        infoSpriteBuffer.setTextColor(PAL_WHITE);  // White for notes in current set
       }
     } else {
-      keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for non-scale notes
+      infoSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for notes not in current set
     }
+
+
+
     keysSpriteBuffer.printf(this->keyNoteName.c_str());
 
     // Draw octave number (flash between white/green and mid grey in MODE_OCTAVE)
@@ -370,10 +413,24 @@ struct Keys {
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 15);
 
-    if (this->inScale) {
+    // if (this->inScale) {
+    //   if (hideOctave) {
+    //     keysSpriteBuffer.setTextColor(PAL_MEDGREY);
+    //   } else if (this->isFundamental) {
+    //     keysSpriteBuffer.setTextColor(PAL_GREEN);
+    //   } else {
+    //     keysSpriteBuffer.setTextColor(PAL_WHITE);
+    //   }
+    //   keysSpriteBuffer.printf(this->octaveS.c_str());
+    // } else {
+    //   keysSpriteBuffer.setTextColor(PAL_DARKGREY);
+    //   keysSpriteBuffer.printf("-");
+    // }
+
+        if (noteInCurrentSet) {
       if (hideOctave) {
         keysSpriteBuffer.setTextColor(PAL_MEDGREY);
-      } else if (this->isFundamental) {
+      } else if (isCurrentRoot) {
         keysSpriteBuffer.setTextColor(PAL_GREEN);
       } else {
         keysSpriteBuffer.setTextColor(PAL_WHITE);
@@ -384,11 +441,14 @@ struct Keys {
       keysSpriteBuffer.printf("-");
     }
 
-    // Draw interval number (semitones from previous scale note)
-    keysSpriteBuffer.setTextSize(0.35);
-    keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
-    keysSpriteBuffer.setTextColor(PAL_WHITE);
-    keysSpriteBuffer.printf(this->intervalS.c_str());
+
+    // Draw interval number only in SCALE_STATE (semitones from previous scale note)
+    if (currentMode == SCALE_STATE) {
+      keysSpriteBuffer.setTextSize(0.35);
+      keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
+      keysSpriteBuffer.setTextColor(PAL_WHITE);
+      keysSpriteBuffer.printf(this->intervalS.c_str());
+    }
 
     // Draw velocity bar if this key is in scale
     if (this->inScale) {
@@ -944,6 +1004,9 @@ void loop() {
     // Update LED 9 based on switch state
     sensor.setLEDColor(8, currentSwitchState ? LED_COLOR_GREEN : LED_COLOR_OFF);
     lastSwitchState = currentSwitchState;
+    // Update system mode based on switch state
+    currentMode = currentSwitchState ? CHORD_STATE : SCALE_STATE;
+
 
     // Redraw entire display for switch state change
     infoSpriteBuffer.fillSprite(0);
@@ -1017,8 +1080,8 @@ void loop() {
       }
     }
 
-    // Handle Encoder 0 chord selection in switch ON mode
-    if (i == 0 && currentSwitchState) {
+    // Handle Encoder 0 chord selection only in CHORD_STATE
+    if (i == 0 && currentMode == CHORD_STATE) {
       static int32_t lastEncoder0Value = 60;  // Match startup value
 
       if (stableValue != lastEncoder0Value) {
@@ -1041,8 +1104,8 @@ void loop() {
     }
 
 
-    // Handle Encoder 1 chord type selection in switch ON mode
-    if (i == 1 && currentSwitchState) {
+    // Handle Encoder 1 chord type selection only in CHORD_STATE
+    if (i == 1 && currentMode == CHORD_STATE) {
       static int32_t lastEncoder1Value = 60;  // Match startup value
 
       if (stableValue != lastEncoder1Value) {
@@ -1280,17 +1343,17 @@ bool initializeSprites() {
   // Info sprite (top bar with scale info)
   infoSprite.setColorDepth(4);
   if (!infoSprite.createSprite(320, 55)) return false;
-  infoSprite.setPaletteColor(0, 0x0001);  // Transparent
-  infoSprite.setPaletteColor(1, 0xffff);  // White
-  infoSprite.setPaletteColor(2, 0x0000);  // Black
-  infoSprite.setPaletteColor(3, 0x39c7);  // Dark grey
-  infoSprite.setPaletteColor(4, 0x7bef);  // Medium grey
-  infoSprite.setPaletteColor(5, 0xd69a);  // Light grey
-  infoSprite.setPaletteColor(6, 0xf800);  // Red
-  infoSprite.setPaletteColor(7, 0x7e0);   // Green
-  infoSprite.setPaletteColor(8, 0x00ff);  // Blue
-  infoSprite.setPaletteColor(9, 0xfd20);  // Orange
-  infoSprite.setPaletteColor(10, 0xC400); // Orange 50%
+  infoSprite.setPaletteColor(0, 0x0001);   // Transparent
+  infoSprite.setPaletteColor(1, 0xffff);   // White
+  infoSprite.setPaletteColor(2, 0x0000);   // Black
+  infoSprite.setPaletteColor(3, 0x39c7);   // Dark grey
+  infoSprite.setPaletteColor(4, 0x7bef);   // Medium grey
+  infoSprite.setPaletteColor(5, 0xd69a);   // Light grey
+  infoSprite.setPaletteColor(6, 0xf800);   // Red
+  infoSprite.setPaletteColor(7, 0x7e0);    // Green
+  infoSprite.setPaletteColor(8, 0x00ff);   // Blue
+  infoSprite.setPaletteColor(9, 0xfd20);   // Orange
+  infoSprite.setPaletteColor(10, 0x6000);  // Orange 50%
   infoSprite.setFont(&DIN_Condensed_Bold30pt7b);
   infoSprite.fillSprite(0);
 
@@ -1307,7 +1370,7 @@ bool initializeSprites() {
   keysSprite.setPaletteColor(7, 0x7e0);
   keysSprite.setPaletteColor(8, 0x00ff);
   keysSprite.setPaletteColor(9, 0xfd20);
-  keysSprite.setPaletteColor(10, 0xC400); // Orange 50%
+  keysSprite.setPaletteColor(10, 0x6000);  // Orange 50%
   keysSprite.setFont(&DIN_Condensed_Bold30pt7b);
   keysSprite.fillSprite(0);
 
@@ -1324,7 +1387,7 @@ bool initializeSprites() {
   encsSprite.setPaletteColor(7, 0x7e0);
   encsSprite.setPaletteColor(8, 0x00ff);
   encsSprite.setPaletteColor(9, 0xfd20);
-  encsSprite.setPaletteColor(10, 0xC400);
+  encsSprite.setPaletteColor(10, 0x6000);
   encsSprite.setFont(&DIN_Condensed_Bold30pt7b);
   encsSprite.fillSprite(0);
 
@@ -1341,7 +1404,7 @@ bool initializeSprites() {
   infoSpriteBuffer.setPaletteColor(7, 0x7e0);
   infoSpriteBuffer.setPaletteColor(8, 0x00ff);
   infoSpriteBuffer.setPaletteColor(9, 0xfd20);
-  infoSpriteBuffer.setPaletteColor(10, 0xC400);
+  infoSpriteBuffer.setPaletteColor(10, 0x6000);
   infoSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   infoSpriteBuffer.fillSprite(0);
 
@@ -1357,7 +1420,7 @@ bool initializeSprites() {
   keysSpriteBuffer.setPaletteColor(7, 0x7e0);
   keysSpriteBuffer.setPaletteColor(8, 0x00ff);
   keysSpriteBuffer.setPaletteColor(9, 0xfd20);
-  keysSpriteBuffer.setPaletteColor(10, 0xC400);
+  keysSpriteBuffer.setPaletteColor(10, 0x6000);
   keysSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   keysSpriteBuffer.fillSprite(0);
 
@@ -1373,7 +1436,7 @@ bool initializeSprites() {
   encsSpriteBuffer.setPaletteColor(7, 0x7e0);
   encsSpriteBuffer.setPaletteColor(8, 0x00ff);
   encsSpriteBuffer.setPaletteColor(9, 0xfd20);
-  encsSpriteBuffer.setPaletteColor(10, 0xC400);
+  encsSpriteBuffer.setPaletteColor(10, 0x6000);
   encsSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   encsSpriteBuffer.fillSprite(0);
 
@@ -1396,6 +1459,15 @@ void drawInfoArea() {
   infoSpriteBuffer.setTextSize(0.55);
   infoSpriteBuffer.setTextDatum(TL_DATUM);
   infoSpriteBuffer.setCursor(3, 3);
+
+  // working - but not required
+  // // Draw mode indicator in top-left corner
+  // infoSpriteBuffer.setTextSize(0.35);
+  // infoSpriteBuffer.setTextDatum(TL_DATUM);
+  // infoSpriteBuffer.setCursor(3, 40);  // Bottom of info area
+  // infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+  // infoSpriteBuffer.printf("MODE: %s", currentMode == SCALE_STATE ? "SCALE" : "CHORD");
+
   if (hideRoot) {
     infoSpriteBuffer.setTextColor(PAL_MEDGREY);
   } else {
@@ -1429,17 +1501,24 @@ void drawInfoArea() {
   infoSpriteBuffer.setColor(PAL_WHITE);
   infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
 
-  // ==================================================================
-  // IMPROVED CHORD DISPLAY
-  // ==================================================================
-  int chordAreaX = 185;      // Position to the right of the scale info area
-  int chordAreaWidth = 130;  // Width for chord display
+  // Only show chord display in CHORD_STATE (switch ON)
+  if (currentMode != CHORD_STATE) {
+    return;  // Skip chord display completely in SCALE_STATE
+  }
 
-  // Draw chord area background
+  // ==================================================================
+  // IMPROVED CHORD DISPLAY (only shown in CHORD_STATE)
+  // ==================================================================
+
+  int chordAreaX = 182;      // 5px from right edge of scale info block (177 + 5)
+  int chordAreaWidth = 138;  // From chord area start to screen edge (320 - 182)
+  int chordAreaHeight = 57;  // Match scale info box height
+
+  // Draw chord area as rounded rectangle
   infoSpriteBuffer.setColor(PAL_DARKGREY);
-  infoSpriteBuffer.fillRect(chordAreaX, 2, chordAreaWidth, boxHeight - 4, PAL_DARKGREY);
+  infoSpriteBuffer.fillRoundRect(chordAreaX, 0, chordAreaWidth, chordAreaHeight - 4, 5, PAL_DARKGREY);
   infoSpriteBuffer.setColor(PAL_WHITE);
-  infoSpriteBuffer.drawRect(chordAreaX, 2, chordAreaWidth, boxHeight - 4, PAL_WHITE);
+  infoSpriteBuffer.drawRoundRect(chordAreaX, 0, chordAreaWidth, chordAreaHeight - 4, 5, PAL_WHITE);
 
   // Roman numerals for chord degrees
   const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
@@ -1460,6 +1539,7 @@ void drawInfoArea() {
     String chordName = String(romanNumerals[currentChordDegree]) + ": " + rootNoteName + String(chordTypeNames[static_cast<int>(currentChord.type)]) + " ";
     infoSpriteBuffer.printf("%s", chordName.c_str());
 
+    //NOTES DISPLAY DISABLED - Commented out for cleaner chord display
     // Build and display notes string
     String notesStr = "";
     for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
@@ -1481,7 +1561,7 @@ void drawInfoArea() {
     // Display intervals
     infoSpriteBuffer.setTextSize(0.35);
     infoSpriteBuffer.setTextDatum(TL_DATUM);  // Top Left
-    infoSpriteBuffer.setCursor(chordAreaX + 5, 25);
+    infoSpriteBuffer.setCursor(chordAreaX + 5, 28);
     infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
 
     // Short interval descriptions
@@ -1522,12 +1602,6 @@ void drawInfoArea() {
     infoSpriteBuffer.setTextColor(PAL_WHITE);
     infoSpriteBuffer.printf("%s: No chord", romanNumerals[currentChordDegree]);
   }
-
-
-
-
-
-
 
   // // Draw chord info with Roman numerals and note names
   // infoSpriteBuffer.setTextSize(0.45);
