@@ -1,5 +1,5 @@
 M5Stack CoreS3 UNIT_8ENCODER BLE MIDI Controller
-State of Play - 2025-12-06 16:36 UTC
+State of Play - 2025-12-07 03:23 UTC
 
 === COMPLETED FEATURES ===
 
@@ -77,6 +77,29 @@ State of Play - 2025-12-06 16:36 UTC
    - Hid velocity bars in chord mode
    - Corrected note label coloring (drawn in keys sprite)
    - Stabilized octave display using octaveNo and consistent flashing logic
+
+10. Chord Mode MIDI + Unified Button Logic (2025-12-07 01:55 UTC)
+   - Implemented sendCurrentChordNoteOn/Off and midiFromPitchClass
+   - Added button helpers: btnStartPress, btnLatchHold, btnUnlatchOnPress, btnReleaseShort
+   - Encoder 6 (code index) now follows short-press/hold latch semantics consistently
+   - Migrated scale-mode buttons to the same helper state machine
+
+11. Chord Revoice While Held (2025-12-07 03:13 UTC)
+   - With encoder 6 latched, turning encoder 0 (degree) or 1 (type) revoices the chord
+   - Sends NoteOff for previous chord notes and NoteOn for new notes using encoderVelocity[6]
+   - Latch and LED state preserved
+
+12. MIDI Panic on Encoder 5 Short Press (2025-12-07 03:21 UTC)
+   - Sends CC64=0 (Sustain Off), CC123=0 (All Notes Off), CC120=0 (All Sound Off)
+   - If chord was latched, explicitly stops the chord and resets encoder 6 visuals
+   - Removed per-note 0–127 NoteOff sweep to avoid BLE flooding
+
+13. Chord Key Brightness While Sounding (2025-12-07 03:04 UTC)
+   - chordPlaying flag brightens chord keys to PAL_RED while active; PAL_RED_40 when idle
+
+14. Build/Diagnostics Polish (2025-12-07 01:37 UTC)
+   - Build banner: prints Sketch build (__DATE__ __TIME__)
+   - Verbose chord logs gated via DEBUG_VERBOSE
 
 === PENDING FEATURES ===
 
