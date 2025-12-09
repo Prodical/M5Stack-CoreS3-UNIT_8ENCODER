@@ -59,15 +59,15 @@ const uint16_t COLOR_DARKGREY = 0x39c7;
 const uint16_t COLOR_DARKGRAY = 0x7bef;
 const uint16_t COLOR_LIGHTGRAY = 0xd69a;
 const uint16_t COLOR_RED = 0xf800;
-const uint16_t COLOR_GREEN = 0x7e0;
+const uint16_t COLOR_YELLOW = 0xffe0;   // Replaces green in UI
 const uint16_t COLOR_BLUE = 0x00ff;
 const uint16_t COLOR_ORANGE = 0xfd20;
 const uint16_t COLOR_RED_40 = 0x6000;
 
 // LED color constants for encoder hardware LEDs
 const uint32_t LED_COLOR_OFF = 0x000000;
-const uint32_t LED_COLOR_GREEN = 0x00FF00;
-const uint32_t LED_COLOR_ORANGE = 0xFF8000;
+const uint32_t LED_COLOR_YELLOW = 0xFFFF00;  // Replaces prior green behavior
+const uint32_t LED_COLOR_RED_40 = 0x660000;  // Dim red for short-press state
 
 // Palette index constants (for 4-bit color sprites)
 const uint8_t PAL_TRANSPARENT = 0;
@@ -77,7 +77,7 @@ const uint8_t PAL_DARKGREY = 3;
 const uint8_t PAL_MEDGREY = 4;
 const uint8_t PAL_LIGHTGREY = 5;
 const uint8_t PAL_RED = 6;
-const uint8_t PAL_GREEN = 7;
+const uint8_t PAL_YELLOW = 7;   // Index retained; color remapped to yellow in palette init
 const uint8_t PAL_BLUE = 8;
 const uint8_t PAL_ORANGE = 9;
 const uint8_t PAL_RED_40 = 10;
@@ -87,6 +87,9 @@ const uint8_t PAL_RED_40 = 10;
 //========================================================================
 bool bleMidiConnected = false;
 uint8_t midiChannel = 1;  // MIDI channel (1-16)
+
+// Track whether the current chord is actively sounding (for key fill brightness)
+static bool chordPlaying = false;
 
 // Per-encoder velocity (0-127), controlled by encoder rotation when switch is OFF
 // Initialized to 127 (encoder at 0 position = full velocity)
@@ -124,6 +127,10 @@ enum SystemMode {
   SCALE_STATE = 0,
   CHORD_STATE = 1
 };
+
+// Chord submodes inside CHORD_STATE
+enum ChordSubMode : uint8_t { CHORD_NORMAL = 0, CHORD_ASSIGN = 1 };
+static ChordSubMode chordSubMode = CHORD_NORMAL;
 
 static bool encoder7ButtonWasPressed = false;
 SystemMode currentMode = SCALE_STATE;  // Track current system mode
@@ -233,6 +240,10 @@ const bool whiteKeys[12] = { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 };
 //========================================================================
 // ENCODER STRUCTURE & STATE
 //========================================================================
+// Assign-mode slots: one degree per encoder 0–6
+struct AssignSlot { int8_t degree; };
+static AssignSlot assignSlots[7];
+
 // Defines visual representation and state of on-screen encoder widgets
 struct Encoders {
   int x;                              // X position on screen
@@ -261,11 +272,11 @@ struct Encoders {
   void drawEncs(int8_t encNo) {
     // Determine circle color based on state
     uint8_t circleColor;
-    if (this->isActive) {
-      circleColor = PAL_GREEN;  // Green for active/locked
+if (this->isActive) {
+      circleColor = PAL_YELLOW;  // Active/locked (palette index 7 now mapped to yellow)
     } else if (this->shortPress) {
-      // Encoder 7: white on short press, others: orange
-      circleColor = (encNo == 7) ? PAL_WHITE : PAL_ORANGE;
+      // Encoder 7: white on short press, others: dim red instead of orange
+      circleColor = (encNo == 7) ? PAL_WHITE : PAL_RED_40;
     } else {
       circleColor = this->colourIdle;  // Use encoder's idle color (mid grey for enc 7, dark grey for others)
     }
@@ -284,6 +295,24 @@ struct Encoders {
     int outerRadius = r - (arcColor == PAL_BLACK ? 2 : 4);
 
     encsSpriteBuffer.drawArc(x, y, innerRadius, outerRadius, startAngle, endAngle, arcColor);
+
+    // Roman numerals centered precisely using text width in CHORD_ASSIGN
+    if (currentMode == CHORD_STATE && chordSubMode == CHORD_ASSIGN && encNo <= 6) {
+      const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
+      int d = assignSlots[encNo].degree;
+      if (d < 0) d = 0; if (d > 6) d = 6;
+      encsSpriteBuffer.setTextSize(0.35);
+      // Force light grey (match E7 graphic) regardless of background
+      encsSpriteBuffer.setTextColor(PAL_LIGHTGREY);
+      // Measure and center manually
+      int tw = encsSpriteBuffer.textWidth(romanNumerals[d]);
+      int th = encsSpriteBuffer.fontHeight();
+      int cx = x - (tw / 2);
+      int cy = y - (th / 2) + 1;
+      encsSpriteBuffer.setTextDatum(TL_DATUM);
+      encsSpriteBuffer.setCursor(cx, cy);
+      encsSpriteBuffer.printf("%s", romanNumerals[d]);
+    }
   }
 };
 
@@ -333,9 +362,10 @@ struct Keys {
     }
 
     if (noteInChord && currentMode == CHORD_STATE) {
-      // Draw chord note highlight with orange-50% color
-      keysSpriteBuffer.setColor(PAL_RED_40);
-      keysSpriteBuffer.fillRoundRect(x, y, w, h, 5, PAL_RED_40);
+      // Draw chord note highlight: bright red when chord sounding, dim when idle
+      uint8_t col = chordPlaying ? PAL_RED : PAL_RED_40;
+      keysSpriteBuffer.setColor(col);
+      keysSpriteBuffer.fillRoundRect(x, y, w, h, 5, col);
     }
 
     // Draw key outline (this will be on top of highlight)
@@ -360,18 +390,7 @@ struct Keys {
       keysSpriteBuffer.setCursor(this->x + w / 2 - 8, this->y + h - 35);
     }
 
-    // // Color: green for root, white for in-scale, grey for out-of-scale
-    // if (this->inScale) {
-    //   if (this->isFundamental) {
-    //     keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
-    //   } else {
-    //     keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for scale notes
-    //   }
-    // } else {
-    //   keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for non-scale notes
-    // }
-
-    // Color: green for root, white for in-scale/chord, grey for out-of-scale/chord
+    // Color: yellow for root, white for in-scale/chord, grey for out-of-scale/chord
     bool noteInCurrentSet;
     bool isCurrentRoot;
 
@@ -394,9 +413,9 @@ struct Keys {
       }
     }
 
-    if (noteInCurrentSet) {
+if (noteInCurrentSet) {
       if (isCurrentRoot) {
-        keysSpriteBuffer.setTextColor(PAL_GREEN);  // Green for root
+        keysSpriteBuffer.setTextColor(PAL_YELLOW);  // Palette index 7 (now yellow) for root
       } else {
         keysSpriteBuffer.setTextColor(PAL_WHITE);  // White for notes in current set
       }
@@ -404,34 +423,18 @@ struct Keys {
       keysSpriteBuffer.setTextColor(PAL_DARKGREY);  // Grey for notes not in current set
     }
 
-
-
     keysSpriteBuffer.printf(this->keyNoteName.c_str());
 
-    // Draw octave number (flash between white/green and mid grey in MODE_OCTAVE)
+    // Draw octave number (flash between white/yellow and mid grey in MODE_OCTAVE)
     bool hideOctave = (encoder7Mode == MODE_OCTAVE && !flashState && noteInCurrentSet);
     keysSpriteBuffer.setTextSize(0.35);
     keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + h - 15);
-
-    // if (this->inScale) {
-    //   if (hideOctave) {
-    //     keysSpriteBuffer.setTextColor(PAL_MEDGREY);
-    //   } else if (this->isFundamental) {
-    //     keysSpriteBuffer.setTextColor(PAL_GREEN);
-    //   } else {
-    //     keysSpriteBuffer.setTextColor(PAL_WHITE);
-    //   }
-    //   keysSpriteBuffer.printf(this->octaveS.c_str());
-    // } else {
-    //   keysSpriteBuffer.setTextColor(PAL_DARKGREY);
-    //   keysSpriteBuffer.printf("-");
-    // }
 
     if (noteInCurrentSet) {
       if (hideOctave) {
         keysSpriteBuffer.setTextColor(PAL_MEDGREY);
       } else if (isCurrentRoot) {
-        keysSpriteBuffer.setTextColor(PAL_GREEN);
+        keysSpriteBuffer.setTextColor(PAL_YELLOW);
       } else {
         keysSpriteBuffer.setTextColor(PAL_WHITE);
       }
@@ -442,16 +445,16 @@ struct Keys {
     }
 
 
-    // Draw scale interval number (semitones from previous scale note) - always shown
-    keysSpriteBuffer.setTextSize(0.35);
-    keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
-    // Green for scale root, white/mid-grey for others
-    if (this->isFundamental) {
-      keysSpriteBuffer.setTextColor(PAL_GREEN);
-    } else {
-      keysSpriteBuffer.setTextColor(currentMode == SCALE_STATE ? PAL_WHITE : PAL_MEDGREY);
-    }
-    keysSpriteBuffer.printf(this->intervalS.c_str());
+// Draw scale interval number (semitones from previous scale note) - always shown
+keysSpriteBuffer.setTextSize(0.35);
+keysSpriteBuffer.setCursor(this->x + w / 2 - 4, this->y + 15);
+// Yellow (palette idx 7) for scale root, white/mid-grey for others
+if (this->isFundamental) {
+  keysSpriteBuffer.setTextColor(PAL_YELLOW);
+} else {
+  keysSpriteBuffer.setTextColor(currentMode == SCALE_STATE ? PAL_WHITE : PAL_MEDGREY);
+}
+keysSpriteBuffer.printf(this->intervalS.c_str());
 
     // Draw chord interval in CHORD_STATE (step from previous chord note)
     if (currentMode == CHORD_STATE && noteInChord) {
@@ -510,10 +513,10 @@ struct Keys {
 
         // Determine bar color based on button state of corresponding encoder
         uint8_t barColor = PAL_MEDGREY;  // Default: mid grey
-        if (enc[encoderIdx].isActive) {
-          barColor = PAL_GREEN;  // Hold: green (active/locked)
+if (enc[encoderIdx].isActive) {
+          barColor = PAL_YELLOW;  // Hold: palette index 7 (now yellow)
         } else if (enc[encoderIdx].shortPress) {
-          barColor = PAL_ORANGE;  // Short press: orange
+          barColor = PAL_RED_40;  // Short press: dim red (was orange)
         }
 
         // Draw bar from bottom up (base to base-height)
@@ -639,6 +642,157 @@ bool updateButtonState(uint8_t buttonIndex, bool isPressed, unsigned long curren
 bool isValueStable(int32_t newValue, uint8_t encoderIndex);
 
 //========================================================================
+// BUTTON ACTION DISPATCH (scaffold; not yet wired)
+//========================================================================
+struct ButtonAction {
+  void (*onPressStart)(uint8_t encIndex);
+  void (*onReleaseShort)(uint8_t encIndex);
+  void (*onHold)(uint8_t encIndex);
+  void (*onPressWhileLatched)(uint8_t encIndex);
+  bool allowsLatch;
+};
+
+// Forward declarations for action handlers (stubs for now)
+void act_note_onPressStart(uint8_t i);     // scale key-like
+void act_note_onReleaseShort(uint8_t i);
+void act_note_onHold(uint8_t i);
+void act_note_onPressWhileLatched(uint8_t i);
+
+void act_chord_onPressStart(uint8_t i);    // encoder 6 chord trigger
+void act_chord_onReleaseShort(uint8_t i);
+void act_chord_onHold(uint8_t i);
+void act_chord_onPressWhileLatched(uint8_t i);
+
+void act_panic_onPressStart(uint8_t i);    // encoder 5 panic (chord mode only)
+void act_panic_onReleaseShort(uint8_t i);
+void act_panic_onHold(uint8_t i);
+void act_panic_onPressWhileLatched(uint8_t i);
+
+void act_mode_onPressStart(uint8_t i);     // encoder 7 mode cycle (short only)
+void act_mode_onReleaseShort(uint8_t i);
+void act_mode_onHold(uint8_t i);
+void act_mode_onPressWhileLatched(uint8_t i);
+
+// Assign-mode trigger handlers
+void act_assign_onPressStart(uint8_t i);
+void act_assign_onReleaseShort(uint8_t i);
+void act_assign_onHold(uint8_t i);
+void act_assign_onPressWhileLatched(uint8_t i);
+
+// Concrete action instances
+static ButtonAction ACTION_NOTE_KEY = {
+  .onPressStart = act_note_onPressStart,
+  .onReleaseShort = act_note_onReleaseShort,
+  .onHold = act_note_onHold,
+  .onPressWhileLatched = act_note_onPressWhileLatched,
+  .allowsLatch = true
+};
+
+static ButtonAction ACTION_CHORD_TRIGGER = {
+  .onPressStart = act_chord_onPressStart,
+  .onReleaseShort = act_chord_onReleaseShort,
+  .onHold = act_chord_onHold,
+  .onPressWhileLatched = act_chord_onPressWhileLatched,
+  .allowsLatch = true
+};
+
+static ButtonAction ACTION_PANIC = {
+  .onPressStart = act_panic_onPressStart,
+  .onReleaseShort = act_panic_onReleaseShort,
+  .onHold = act_panic_onHold,
+  .onPressWhileLatched = act_panic_onPressWhileLatched,
+  .allowsLatch = false
+};
+
+static ButtonAction ACTION_MODE_CYCLE = {
+  .onPressStart = act_mode_onPressStart,
+  .onReleaseShort = act_mode_onReleaseShort,
+  .onHold = act_mode_onHold,
+  .onPressWhileLatched = act_mode_onPressWhileLatched,
+  .allowsLatch = false
+};
+
+static ButtonAction ACTION_ASSIGN_TRIGGER = {
+  .onPressStart = act_assign_onPressStart,
+  .onReleaseShort = act_assign_onReleaseShort,
+  .onHold = act_assign_onHold,
+  .onPressWhileLatched = act_assign_onPressWhileLatched,
+  .allowsLatch = true
+};
+
+// No-op action (does nothing)
+static ButtonAction ACTION_NOOP = {
+  .onPressStart = nullptr,
+  .onReleaseShort = nullptr,
+  .onHold = nullptr,
+  .onPressWhileLatched = nullptr,
+  .allowsLatch = false
+};
+
+// Action maps per mode (SCALE_STATE, CHORD_STATE)
+static ButtonAction* actionMap[2][8];
+
+// Alternative mapping for CHORD_ASSIGN
+static ButtonAction* const kChordAssignMap[8] = {
+  &ACTION_ASSIGN_TRIGGER, &ACTION_ASSIGN_TRIGGER, &ACTION_ASSIGN_TRIGGER, &ACTION_ASSIGN_TRIGGER,
+  &ACTION_ASSIGN_TRIGGER, &ACTION_ASSIGN_TRIGGER, &ACTION_ASSIGN_TRIGGER, &ACTION_MODE_CYCLE
+};
+
+// Configuration defaults
+static ButtonAction* const kDefaultScaleMap[8] = {
+  &ACTION_NOTE_KEY, &ACTION_NOTE_KEY, &ACTION_NOTE_KEY, &ACTION_NOTE_KEY,
+  &ACTION_NOTE_KEY, &ACTION_NOTE_KEY, &ACTION_NOTE_KEY, &ACTION_MODE_CYCLE
+};
+
+static ButtonAction* const kDefaultChordMap[8] = {
+  &ACTION_CHORD_TRIGGER, &ACTION_CHORD_TRIGGER, &ACTION_NOOP, &ACTION_NOOP,
+  &ACTION_NOOP, &ACTION_NOOP, &ACTION_NOOP, &ACTION_MODE_CYCLE
+};
+
+void initActionMaps() {
+  // Copy defaults into live map
+  for (int j = 0; j < 8; ++j) actionMap[SCALE_STATE][j] = kDefaultScaleMap[j];
+  for (int j = 0; j < 8; ++j) actionMap[CHORD_STATE][j] = kDefaultChordMap[j];
+}
+
+// Swap CHORD_STATE row based on submode
+void applyChordSubModeMapping() {
+  if (chordSubMode == CHORD_ASSIGN) {
+    for (int j = 0; j < 8; ++j) actionMap[CHORD_STATE][j] = kChordAssignMap[j];
+  } else {
+    for (int j = 0; j < 8; ++j) actionMap[CHORD_STATE][j] = kDefaultChordMap[j];
+  }
+}
+
+// Chord function forward declarations (ensure availability before use)
+void initChordSystem();
+void updateCurrentChord();
+void selectChordByDegree(int8_t degree);
+void changeChordType(ChordType newType);
+
+// Generic button/LED helpers (to unify button state handling)
+enum ButtonVisualState : uint8_t { VIS_IDLE_OFF = 0, VIS_SHORT_RED40 = 1, VIS_LATCH_YELLOW = 2 };
+void setButtonVisual(uint8_t encIndex, ButtonVisualState state);
+void btnStartPress(uint8_t encIndex);
+void btnLatchHold(uint8_t encIndex);
+void btnUnlatchOnPress(uint8_t encIndex);
+void btnReleaseShort(uint8_t encIndex);
+
+// Panic helpers
+void panicAllNotesOff();
+void handlePanicResetChordIfLatched();
+void clearAllEncoderLatchesAndVisuals();
+
+// BLE MIDI chord helpers
+void sendCurrentChordNoteOn(uint8_t velocity);
+void sendCurrentChordNoteOff();
+uint8_t midiFromPitchClass(int8_t pitchClass);
+
+// Assign-mode helpers
+void initAssignSlotsDefaults();
+ChordType determineDiatonicTriadForDegree(int8_t degree);
+
+//========================================================================
 // BLE MIDI HELPER FUNCTIONS
 //========================================================================
 // Calculate MIDI note for encoder button (encoders 0-6 = scale notes)
@@ -663,6 +817,286 @@ uint8_t getEncoderVelocity(uint8_t encoderIndex) {
   return encoderVelocity[encoderIndex];
 }
 
+// Compute MIDI note from pitch class and current octave (C4=60)
+uint8_t midiFromPitchClass(int8_t pitchClass) {
+  int midi = (pitchClass % 12);
+  if (midi < 0) midi += 12;
+  midi += ((currentOctave + 1) * 12);
+  if (midi < 0) midi = 0;
+  if (midi > 127) midi = 127;
+  return static_cast<uint8_t>(midi);
+}
+
+// Send NoteOn for all notes in currentChord using provided velocity
+void sendCurrentChordNoteOn(uint8_t velocity) {
+  if (!bleMidiConnected) return;
+  for (uint8_t i = 0; i < currentChord.noteCount && i < 6; i++) {
+    uint8_t note = midiFromPitchClass(currentChord.notes[i]);
+    MIDI.sendNoteOn(note, velocity, midiChannel);
+#if DEBUG_VERBOSE
+    Serial.printf("[BLE MIDI] Chord NoteOn: %d, vel: %d, ch: %d\n", note, velocity, midiChannel);
+#endif
+  }
+  chordPlaying = true;
+}
+
+// Send NoteOff for all notes in currentChord
+void sendCurrentChordNoteOff() {
+  if (!bleMidiConnected) return;
+  for (uint8_t i = 0; i < currentChord.noteCount && i < 6; i++) {
+    uint8_t note = midiFromPitchClass(currentChord.notes[i]);
+    MIDI.sendNoteOff(note, 0, midiChannel);
+#if DEBUG_VERBOSE
+    Serial.printf("[BLE MIDI] Chord NoteOff: %d, ch: %d\n", note, midiChannel);
+#endif
+  }
+  chordPlaying = false;
+}
+
+//========================================================================
+// BUTTON/LED HELPERS - IMPLEMENTATIONS (no behavior change yet)
+//========================================================================
+void panicAllNotesOff() {
+  if (!bleMidiConnected) return;
+  // CC-only panic to avoid flooding BLE with 128 NoteOffs
+  MIDI.sendControlChange(64, 0, midiChannel);   // Sustain off
+  MIDI.sendControlChange(123, 0, midiChannel);  // All Notes Off (per channel)
+  MIDI.sendControlChange(120, 0, midiChannel);  // All Sound Off (per channel)
+}
+
+void handlePanicResetChordIfLatched() {
+  if (currentMode == CHORD_STATE && enc[6].isActive) {
+    if (bleMidiConnected) {
+      sendCurrentChordNoteOff();
+    }
+    chordPlaying = false;
+    btnUnlatchOnPress(6);
+  }
+}
+
+// Clear all encoder latch states and LEDs/visuals
+void clearAllEncoderLatchesAndVisuals() {
+  for (int i = 0; i < NUM_ENCODERS; ++i) {
+    if (enc[i].isActive || enc[i].shortPress) {
+      enc[i].isActive = false;
+      enc[i].shortPress = false;
+      waitingForNextPress[i] = false;
+      buttonHoldProcessed[i] = true; // avoid treating release as short
+      setButtonVisual(i, VIS_IDLE_OFF);
+    }
+  }
+}
+
+void setButtonVisual(uint8_t encIndex, ButtonVisualState state) {
+  switch (state) {
+    case VIS_IDLE_OFF:
+      enc[encIndex].shortPress = false;
+      sensor.setLEDColor(encIndex, LED_COLOR_OFF);
+      break;
+    case VIS_SHORT_RED40:
+      enc[encIndex].shortPress = true;
+      // Short press now uses dim red instead of orange
+      sensor.setLEDColor(encIndex, LED_COLOR_RED_40);
+      break;
+    case VIS_LATCH_YELLOW:
+      enc[encIndex].shortPress = false;
+      // Latch now uses yellow instead of green
+      sensor.setLEDColor(encIndex, LED_COLOR_YELLOW);
+      break;
+  }
+}
+
+void btnStartPress(uint8_t encIndex) {
+  buttonPressStartTime[encIndex] = millis();
+  buttonHoldProcessed[encIndex] = false;
+  setButtonVisual(encIndex, VIS_SHORT_RED40);
+}
+
+void btnLatchHold(uint8_t encIndex) {
+  enc[encIndex].isActive = true;
+  enc[encIndex].shortPress = false;
+  waitingForNextPress[encIndex] = true;
+  buttonHoldProcessed[encIndex] = true;
+  setButtonVisual(encIndex, VIS_LATCH_YELLOW);
+}
+
+void btnUnlatchOnPress(uint8_t encIndex) {
+  enc[encIndex].isActive = false;
+  enc[encIndex].shortPress = false;
+  waitingForNextPress[encIndex] = false;
+  // Mark as processed so release edge isn’t treated as short press
+  buttonHoldProcessed[encIndex] = true;
+  setButtonVisual(encIndex, VIS_IDLE_OFF);
+}
+
+void btnReleaseShort(uint8_t encIndex) {
+  // Only for non-latched, non-held short-press releases
+  enc[encIndex].shortPress = false;
+  setButtonVisual(encIndex, VIS_IDLE_OFF);
+  // Reset hold flag for next cycle
+  buttonHoldProcessed[encIndex] = false;
+}
+
+//========================================================================
+// BLE MIDI CALLBACKS
+//========================================================================
+//========================================================================
+// BUTTON ACTION HANDLERS (stubs; behavior already handled elsewhere)
+//========================================================================
+void act_note_onPressStart(uint8_t i) {
+  // Start short press: visual dim red and optional NoteOn
+  btnStartPress(i);
+  bool sendsMidi = (!currentSwitchState && i <= 6);
+  if (bleMidiConnected && sendsMidi) {
+    uint8_t midiNote = getEncoderMidiNote(i);
+    uint8_t velocity = getEncoderVelocity(i);
+    MIDI.sendNoteOn(midiNote, velocity, midiChannel);
+#if DEBUG_VERBOSE
+    Serial.printf("[BLE MIDI] NoteOn: %d, vel: %d, ch: %d\n", midiNote, velocity, midiChannel);
+#endif
+  }
+}
+
+void act_note_onPressWhileLatched(uint8_t i) {
+  // Deactivate on press while latched
+  bool sendsMidi = (!currentSwitchState && i <= 6);
+  if (bleMidiConnected && sendsMidi) {
+    uint8_t midiNote = getEncoderMidiNote(i);
+    MIDI.sendNoteOff(midiNote, 0, midiChannel);
+#if DEBUG_VERBOSE
+    Serial.printf("[BLE MIDI] NoteOff (deactivate): %d, ch: %d\n", midiNote, midiChannel);
+#endif
+  }
+  btnUnlatchOnPress(i);
+}
+
+void act_note_onHold(uint8_t i) {
+  // Latch the note (LED yellow); MIDI already on from press
+  btnLatchHold(i);
+}
+
+void act_note_onReleaseShort(uint8_t i) {
+  // If not latched and not processed by hold, send NoteOff and clear visual
+  if (!enc[i].isActive && !buttonHoldProcessed[i]) {
+    bool sendsMidi = (!currentSwitchState && i <= 6);
+    if (bleMidiConnected && sendsMidi) {
+      uint8_t midiNote = getEncoderMidiNote(i);
+      MIDI.sendNoteOff(midiNote, 0, midiChannel);
+#if DEBUG_VERBOSE
+      Serial.printf("[BLE MIDI] NoteOff (release): %d, ch: %d\n", midiNote, midiChannel);
+#endif
+    }
+    btnReleaseShort(i);
+  }
+}
+
+// Chord trigger (encoder 6 in chord mode)
+// Chord trigger (press on configured encoders in chord mode)
+void act_chord_onPressStart(uint8_t i) {
+  if (enc[i].isActive) {
+    if (bleMidiConnected) sendCurrentChordNoteOff();
+    btnUnlatchOnPress(i);
+  } else {
+    if (bleMidiConnected) {
+      uint8_t vel = getEncoderVelocity(6);
+      sendCurrentChordNoteOn(vel);
+    }
+    btnStartPress(i);
+  }
+}
+void act_chord_onReleaseShort(uint8_t i) {
+  if (!enc[i].isActive && !buttonHoldProcessed[i]) {
+    if (bleMidiConnected) sendCurrentChordNoteOff();
+    btnReleaseShort(i);
+  }
+}
+void act_chord_onHold(uint8_t i) { btnLatchHold(i); }
+void act_chord_onPressWhileLatched(uint8_t i) { act_chord_onPressStart(i); }
+
+// Panic (encoder 5 in chord mode)
+void act_panic_onPressStart(uint8_t i) {
+  panicAllNotesOff();
+  handlePanicResetChordIfLatched();
+  // Give LED driver a moment after turning off encoder 6 before lighting encoder 5
+  delay(2);
+  btnStartPress(i);
+  // Reassert visual to ensure LED uses dim red (was orange)
+  setButtonVisual(i, VIS_SHORT_RED40);
+}
+void act_panic_onReleaseShort(uint8_t i) {
+  btnReleaseShort(i);
+}
+void act_panic_onHold(uint8_t i) {}
+void act_panic_onPressWhileLatched(uint8_t i) {}
+
+// Assign-mode trigger (encoders 0–6)
+void act_assign_onPressStart(uint8_t i) {
+  if (enc[i].isActive) {
+    if (bleMidiConnected) sendCurrentChordNoteOff();
+    btnUnlatchOnPress(i);
+    return;
+  }
+  int8_t d = (i <= 6) ? assignSlots[i].degree : 0;
+  ChordType t = determineDiatonicTriadForDegree(d);
+  currentChord.type = t;
+  selectChordByDegree(d);
+  if (bleMidiConnected) {
+    uint8_t vel = getEncoderVelocity((i <= 6) ? i : 6);
+    sendCurrentChordNoteOn(vel);
+  }
+  btnStartPress(i);
+}
+void act_assign_onReleaseShort(uint8_t i) {
+  if (!enc[i].isActive && !buttonHoldProcessed[i]) {
+    if (bleMidiConnected) sendCurrentChordNoteOff();
+    btnReleaseShort(i);
+  }
+}
+void act_assign_onHold(uint8_t i) { btnLatchHold(i); }
+void act_assign_onPressWhileLatched(uint8_t i) { act_assign_onPressStart(i); }
+
+// Mode cycle (encoder 7)
+void act_mode_onPressStart(uint8_t i) {
+  buttonPressStartTime[i] = millis();
+  enc[i].shortPress = true;
+  // Ensure a fresh hold cycle regardless of prior state
+  buttonHoldProcessed[i] = false;
+}
+void act_mode_onReleaseShort(uint8_t i) {
+  unsigned long pressDuration = millis() - buttonPressStartTime[i];
+  // If hold already handled, just clear visual
+  if (buttonHoldProcessed[i]) {
+    enc[i].shortPress = false;
+    return;
+  }
+  if (pressDuration < 500) {
+    // Short press cycles parameter mode
+    encoder7Mode = static_cast<EncoderMode>((encoder7Mode + 1) % 4);
+    modeChanged = true;
+  } else if (pressDuration >= BUTTON_HOLD_TIME && currentMode == CHORD_STATE) {
+    // Fallback: treat long press as submode toggle if hold path missed
+    chordSubMode = (chordSubMode == CHORD_NORMAL) ? CHORD_ASSIGN : CHORD_NORMAL;
+    if (chordSubMode == CHORD_ASSIGN) initAssignSlotsDefaults();
+    applyChordSubModeMapping();
+    modeChanged = true;
+  }
+  enc[i].shortPress = false;
+  // Reset hold flag so next cycle can detect holds again
+  buttonHoldProcessed[i] = false;
+}
+void act_mode_onHold(uint8_t i) {
+  // Long press on encoder 7 toggles assign submode in chord mode
+  if (i == 7 && currentMode == CHORD_STATE) {
+    chordSubMode = (chordSubMode == CHORD_NORMAL) ? CHORD_ASSIGN : CHORD_NORMAL;
+    if (chordSubMode == CHORD_ASSIGN) {
+      initAssignSlotsDefaults();
+    }
+    applyChordSubModeMapping();
+    modeChanged = true;
+  }
+}
+void act_mode_onPressWhileLatched(uint8_t i) {}
+
 //========================================================================
 // BLE MIDI CALLBACKS
 //========================================================================
@@ -683,6 +1117,7 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("Starting setup...");
+  Serial.printf("Sketch build: %s %s\n", __DATE__, __TIME__);
 
   // Initialize M5 hardware
   M5.begin();
@@ -847,6 +1282,9 @@ void setup() {
 
   // Initialize chord system
   initChordSystem();
+
+  // Initialize button action maps (not yet used for dispatch)
+  initActionMaps();
 }
 
 //========================================================================
@@ -885,10 +1323,10 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
       if (currentValue != encoder8LastValue) {
         encoderChanged = true;  // Always show rotation on GUI
         delta = (currentValue > encoder8LastValue) ? 1 : -1;
-        Serial.print("Encoder 7 delta (mode ");
-        Serial.print(encoder7Mode);
-        Serial.print("): ");
-        Serial.println(delta);
+        //Serial.print("Encoder 7 delta (mode ");
+        //Serial.print(encoder7Mode);
+        //Serial.print("): ");
+        //Serial.println(delta);
       }
 
       // Only process parameter changes when NOT in MODE_DEFAULT
@@ -940,6 +1378,12 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                 {
                   Serial.print("Root change triggered: ");
                   Serial.println(change);
+
+                  // Snapshot previous chord notes for revoice if latched
+                  int8_t prevNotes[6];
+                  uint8_t prevCount = currentChord.noteCount;
+                  for (uint8_t k = 0; k < prevCount && k < 6; ++k) prevNotes[k] = currentChord.notes[k];
+
                   int newFundamental = fundamental + change;
                   if (newFundamental > 11) newFundamental = 0;
                   else if (newFundamental < 0) newFundamental = 11;
@@ -961,6 +1405,17 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
 
                   setScaleIntervals();
                   updateCurrentChord();
+
+                  // Revoice if chord is held in chord mode
+                  if (currentMode == CHORD_STATE && enc[6].isActive && bleMidiConnected) {
+                    for (uint8_t k = 0; k < prevCount && k < 6; ++k) {
+                      uint8_t offNote = midiFromPitchClass(prevNotes[k]);
+                      MIDI.sendNoteOff(offNote, 0, midiChannel);
+                    }
+                    uint8_t vel6 = getEncoderVelocity(6);
+                    sendCurrentChordNoteOn(vel6);
+                  }
+
                   updateOctaveNumbers();
                   encoderChanged = true;
                   break;
@@ -970,6 +1425,13 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                 {
                   Serial.print("Octave change triggered: ");
                   Serial.println(change);
+
+                  // Snapshot previous octave and chord notes
+                  int prevOctave = currentOctave;
+                  int8_t prevNotes[6];
+                  uint8_t prevCount = currentChord.noteCount;
+                  for (uint8_t k = 0; k < prevCount && k < 6; ++k) prevNotes[k] = currentChord.notes[k];
+
                   int newOctave = currentOctave + change;
                   if (newOctave > 9) newOctave = -1;
                   else if (newOctave < -1) newOctave = 9;
@@ -981,6 +1443,19 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
                       key[j].octaveS = String(currentOctave);
                     }
                   }
+
+                  // Revoice if chord is held in chord mode (use prev octave for NoteOff)
+                  if (currentMode == CHORD_STATE && enc[6].isActive && bleMidiConnected) {
+                    for (uint8_t k = 0; k < prevCount && k < 6; ++k) {
+                      int pc = prevNotes[k] % 12; if (pc < 0) pc += 12;
+                      int midi = pc + ((prevOctave + 1) * 12);
+                      if (midi < 0) midi = 0; if (midi > 127) midi = 127;
+                      MIDI.sendNoteOff((uint8_t)midi, 0, midiChannel);
+                    }
+                    uint8_t vel6 = getEncoderVelocity(6);
+                    sendCurrentChordNoteOn(vel6);
+                  }
+
                   encoderChanged = true;
                   break;
                 }
@@ -1004,6 +1479,8 @@ bool handleEncoderValueChange(int encoderIndex, int32_t currentValue, int32_t& l
 //========================================================================
 void loop() {
   static unsigned long lastUpdate = 0;
+  static bool touchWasDown = false;
+  static unsigned long lastTouchPanicMs = 0;
   static unsigned long lastStatusCheck = 0;
   static bool lastSwitchState = false;
   static int32_t lastEncoderValues[8] = { 60, 60, 60, 60, 60, 60, 60, 60 };  // Match startup values
@@ -1017,6 +1494,24 @@ void loop() {
 
   M5.update();
 
+  // Global touch-to-panic (any touch)
+  {
+    bool touchNow = (M5.Touch.getCount() > 0);
+    if (touchNow && !touchWasDown) {
+      // Edge: touch began
+      unsigned long nowMs = millis();
+      if (nowMs - lastTouchPanicMs > 150) { // simple debounce
+        panicAllNotesOff();
+        handlePanicResetChordIfLatched();
+        clearAllEncoderLatchesAndVisuals();
+        chordPlaying = false; // ensure key highlights dim to RED_40
+        modeChanged = true; // force redraw of visuals reflecting cleared latches
+        lastTouchPanicMs = nowMs;
+      }
+    }
+    touchWasDown = touchNow;
+  }
+
   // Keep BLE MIDI stack alive
   MIDI.read();
 
@@ -1026,13 +1521,14 @@ void loop() {
   bool currentSwitchState = sensor.getSwitchStatus();
   i2cManager.resetErrorCount();
 
-  // Handle switch state change
-  if (currentSwitchState != lastSwitchState) {
-    // Update LED 9 based on switch state
-    sensor.setLEDColor(8, currentSwitchState ? LED_COLOR_GREEN : LED_COLOR_OFF);
-    lastSwitchState = currentSwitchState;
-    // Update system mode based on switch state
-    currentMode = currentSwitchState ? CHORD_STATE : SCALE_STATE;
+// Handle switch state change
+if (currentSwitchState != lastSwitchState) {
+  // Update LED 9 based on switch state (now yellow instead of green)
+  sensor.setLEDColor(8, currentSwitchState ? LED_COLOR_YELLOW : LED_COLOR_OFF);
+  lastSwitchState = currentSwitchState;
+  // Update system mode based on switch state
+  currentMode = currentSwitchState ? CHORD_STATE : SCALE_STATE;
+  if (currentMode == CHORD_STATE) applyChordSubModeMapping();
 
 
     // Redraw entire display for switch state change
@@ -1107,8 +1603,8 @@ void loop() {
       }
     }
 
-    // Handle Encoder 0 chord selection only in CHORD_STATE
-    if (i == 0 && currentMode == CHORD_STATE) {
+// Handle Encoder 0 chord selection only in CHORD_STATE (disabled in assign)
+    if (i == 0 && currentMode == CHORD_STATE && chordSubMode == CHORD_NORMAL) {
       static int32_t lastEncoder0Value = 60;  // Match startup value
 
       if (stableValue != lastEncoder0Value) {
@@ -1124,15 +1620,31 @@ void loop() {
           chordStepAccumulator = 0;
 
           int8_t newDegree = currentChordDegree + chordChange;
+          // If chord is latched, snapshot current notes to send NoteOff before change
+          int8_t prevNotes[6];
+          uint8_t prevCount = currentChord.noteCount;
+          for (uint8_t k = 0; k < prevCount && k < 6; ++k) prevNotes[k] = currentChord.notes[k];
+
           selectChordByDegree(newDegree);
+
+          // Retrigger chord MIDI with new notes if chord is currently sounding
+          if (bleMidiConnected && chordPlaying) {
+            for (uint8_t k = 0; k < prevCount && k < 6; ++k) {
+              uint8_t offNote = midiFromPitchClass(prevNotes[k]);
+              MIDI.sendNoteOff(offNote, 0, midiChannel);
+            }
+            uint8_t vel = getEncoderVelocity(6);
+            sendCurrentChordNoteOn(vel);
+          }
+
           encoderChanged = true;  // Trigger display update
         }
       }
     }
 
 
-    // Handle Encoder 1 chord type selection only in CHORD_STATE
-    if (i == 1 && currentMode == CHORD_STATE) {
+// Handle Encoder 1 chord type selection only in CHORD_STATE (disabled in assign)
+    if (i == 1 && currentMode == CHORD_STATE && chordSubMode == CHORD_NORMAL) {
       static int32_t lastEncoder1Value = 60;  // Match startup value
 
       if (stableValue != lastEncoder1Value) {
@@ -1162,153 +1674,111 @@ void loop() {
           Serial.print(" -> ");
           Serial.println(newTypeIndex);
 
+          // If chord is latched, snapshot current notes to send NoteOff before change
+          int8_t prevNotes[6];
+          uint8_t prevCount = currentChord.noteCount;
+          for (uint8_t k = 0; k < prevCount && k < 6; ++k) prevNotes[k] = currentChord.notes[k];
+
           changeChordType(static_cast<ChordType>(newTypeIndex));
+
+          // Retrigger chord MIDI with new notes if chord is currently sounding
+          if (bleMidiConnected && chordPlaying) {
+            for (uint8_t k = 0; k < prevCount && k < 6; ++k) {
+              uint8_t offNote = midiFromPitchClass(prevNotes[k]);
+              MIDI.sendNoteOff(offNote, 0, midiChannel);
+            }
+            uint8_t vel = getEncoderVelocity(6);
+            sendCurrentChordNoteOn(vel);
+          }
+
           encoderChanged = true;  // Trigger display update
         }
       }
     }
 
-
-    // // Handle Encoder 1 chord type selection in switch ON mode
-    // if (i == 1 && currentSwitchState) {
-    //   static int32_t lastEncoder1Value = 60;  // Match startup value
-
-    //   if (stableValue != lastEncoder1Value) {
-    //     int32_t delta = (stableValue > lastEncoder1Value) ? 1 : -1;
-    //     lastEncoder1Value = stableValue;
-
-    //     static int32_t typeStepAccumulator = 0;
-    //     typeStepAccumulator += delta;
-
-    //     // Require 2 steps before changing
-    //     if (abs(typeStepAccumulator) >= 2) {
-    //       int typeChange = typeStepAccumulator / 2;
-    //       typeStepAccumulator = 0;
-
-    //       // Cycle through chord types
-    //       int currentTypeIndex = static_cast<int>(currentChord.type);
-    //       int newTypeIndex = currentTypeIndex + typeChange;
-
-    //       // Wrap around available types (0-6)
-    //       if (newTypeIndex > 6) newTypeIndex = 0;
-    //       if (newTypeIndex < 0) newTypeIndex = 6;
-
-    //       changeChordType(static_cast<ChordType>(newTypeIndex));
-    //       encoderChanged = true;  // Trigger display update
-    //     }
-    //   }
-    // }
-
-
-
-
-    // ==================================================================
-    // HANDLE BUTTON PRESS/HOLD/RELEASE
-    // ==================================================================
-
-    // Button press detected
-    if (buttonPressed && !buttonWasPressed[i]) {
-      // Encoder 7: mode cycling on short press (no MIDI)
-      if (i == 7) {
-        buttonPressStartTime[i] = millis();
-        enc[i].shortPress = true;  // Show white indicator
-        encoderChanged = true;
-        buttonWasPressed[i] = buttonPressed;
-        continue;
-      }
-
-      // Only encoders 0-6 send MIDI notes (switch OFF mode)
-      // Switch ON: buttons don't send MIDI (encoders 5-7 control params)
-      bool sendsMidi = !currentSwitchState && i <= 6;
-
-      if (enc[i].isActive && waitingForNextPress[i]) {
-        // Pressing active encoder deactivates it - send NoteOff
-        if (bleMidiConnected && sendsMidi) {
-          uint8_t midiNote = getEncoderMidiNote(i);
-          MIDI.sendNoteOff(midiNote, 0, midiChannel);
-          Serial.printf("[BLE MIDI] NoteOff (deactivate): %d, ch: %d\n", midiNote, midiChannel);
+// Assign-mode degree rotation per encoder (0–6), silent UI update only
+    if (currentMode == CHORD_STATE && chordSubMode == CHORD_ASSIGN && i <= 6) {
+      static int32_t lastAssignVal[7] = {60,60,60,60,60,60,60};
+      if (stableValue != lastAssignVal[i]) {
+        int delta = (stableValue > lastAssignVal[i]) ? 1 : -1;
+        lastAssignVal[i] = stableValue;
+        static int32_t acc[7] = {0};
+        acc[i] += delta;
+        if (abs(acc[i]) >= 2) {
+          int change = acc[i] / 2; acc[i] = 0;
+          int nd = assignSlots[i].degree + change;
+          while (nd < 0) nd += 7; while (nd > 6) nd -= 7;
+          assignSlots[i].degree = (int8_t)nd;
+          encoderChanged = true;
         }
-        Serial.print("Encoder ");
-        Serial.print(i);
-        Serial.println(" button pressed - deactivating");
-        enc[i].isActive = false;
-        enc[i].shortPress = false;
-        waitingForNextPress[i] = false;
-        sensor.setLEDColor(i, LED_COLOR_OFF);
-        encoderChanged = true;
-      } else if (!enc[i].isActive) {
-        // New press on inactive encoder - send NoteOn, start timing for hold
-        if (bleMidiConnected && sendsMidi) {
-          uint8_t midiNote = getEncoderMidiNote(i);
-          uint8_t velocity = getEncoderVelocity(i);
-          MIDI.sendNoteOn(midiNote, velocity, midiChannel);
-          Serial.printf("[BLE MIDI] NoteOn: %d, vel: %d, ch: %d\n", midiNote, velocity, midiChannel);
-        }
-        buttonPressStartTime[i] = millis();
-        buttonHoldProcessed[i] = false;
-        enc[i].shortPress = true;  // Show orange indicator
-        sensor.setLEDColor(i, LED_COLOR_ORANGE);
-        Serial.print("Encoder ");
-        Serial.print(i);
-        Serial.println(" button pressed - waiting for hold");
-        encoderChanged = true;
-      }
-    }
-    // Button released
-    else if (!buttonPressed && buttonWasPressed[i]) {
-      // Encoder 7: cycle mode on short press release
-      if (i == 7) {
-        unsigned long pressDuration = millis() - buttonPressStartTime[i];
-        if (pressDuration < 500) {                                          // Short press cycles mode
-          encoder7Mode = static_cast<EncoderMode>((encoder7Mode + 1) % 4);  // 4 modes now
-          modeChanged = true;
-          Serial.print("Encoder 7 mode changed to: ");
-          switch (encoder7Mode) {
-            case MODE_DEFAULT: Serial.println("DEFAULT"); break;
-            case MODE_SCALE: Serial.println("SCALE"); break;
-            case MODE_ROOT: Serial.println("ROOT"); break;
-            case MODE_OCTAVE: Serial.println("OCTAVE"); break;
-          }
-        }
-        enc[i].shortPress = false;  // Turn off white indicator
-        encoderChanged = true;
-        buttonWasPressed[i] = buttonPressed;
-        continue;
-      }
-
-      bool sendsMidi = !currentSwitchState && i <= 6;
-
-      // Only send NoteOff on release if it was a short press (not held/active)
-      if (!enc[i].isActive && !buttonHoldProcessed[i]) {
-        if (bleMidiConnected && sendsMidi) {
-          uint8_t midiNote = getEncoderMidiNote(i);
-          MIDI.sendNoteOff(midiNote, 0, midiChannel);
-          Serial.printf("[BLE MIDI] NoteOff (release): %d, ch: %d\n", midiNote, midiChannel);
-        }
-        // Short press released - turn off orange indicator
-        enc[i].shortPress = false;
-        sensor.setLEDColor(i, LED_COLOR_OFF);
-        encoderChanged = true;
-      }
-    }
-    // Button held (check for 1 second hold time)
-    else if (buttonPressed && buttonWasPressed[i] && !buttonHoldProcessed[i] && !enc[i].isActive) {
-      unsigned long currentTime = millis();
-      if (currentTime - buttonPressStartTime[i] >= BUTTON_HOLD_TIME) {
-        // Hold time reached - activate encoder
-        Serial.print("Encoder ");
-        Serial.print(i);
-        Serial.println(" button held for 1 second - activating");
-        enc[i].isActive = true;
-        enc[i].shortPress = false;
-        waitingForNextPress[i] = true;
-        sensor.setLEDColor(i, LED_COLOR_GREEN);
-        encoderChanged = true;
-        buttonHoldProcessed[i] = true;
       }
     }
 
+// ==================================================================
+// HANDLE BUTTON PRESS/HOLD/RELEASE
+// ==================================================================
+
+// Button press detected
+if (buttonPressed && !buttonWasPressed[i]) {
+  // Unified dispatch for all encoders via action map
+  ButtonAction* A = actionMap[currentMode][i];
+  if (A) {
+    if (enc[i].isActive && waitingForNextPress[i]) {
+      if (A->onPressWhileLatched) A->onPressWhileLatched(i);
+    } else {
+      if (A->onPressStart) A->onPressStart(i);
+    }
+    encoderChanged = true;
     buttonWasPressed[i] = buttonPressed;
+    continue;
+  }
+}
+// Button released
+else if (!buttonPressed && buttonWasPressed[i]) {
+  // Unified dispatch for all encoders on release
+  ButtonAction* A = actionMap[currentMode][i];
+  if (A) {
+    if (A->onReleaseShort) A->onReleaseShort(i);
+    encoderChanged = true;
+    buttonWasPressed[i] = buttonPressed;
+    continue;
+  }
+
+}
+// Button held (check for 1 second hold time)
+else if (buttonPressed && buttonWasPressed[i] && !buttonHoldProcessed[i] && !enc[i].isActive) {
+  unsigned long now = millis();
+// Encoder 7 (mode button) does not latch, but we still allow onHold action (e.g., submode toggle)
+  if (i == 7) {
+    if (now - buttonPressStartTime[i] >= BUTTON_HOLD_TIME) {
+      ButtonAction* A = actionMap[currentMode][i];
+      if (A && A->onHold) A->onHold(i);
+      buttonHoldProcessed[i] = true;
+      encoderChanged = true;
+    }
+    continue;
+  }
+  // Encoder 5 no longer reserved for panic; allow normal hold/press flow
+// CHORD_STATE, encoder 6: latch on hold (via action)
+  if (currentMode == CHORD_STATE && i == 6) {
+    if (now - buttonPressStartTime[i] >= BUTTON_HOLD_TIME) {
+      ButtonAction* A = actionMap[currentMode][i];
+      if (A && A->onHold) A->onHold(i);
+      encoderChanged = true;
+    }
+    continue;
+  }
+
+  // Unified hold dispatch for all other encoders (actions control whether to latch)
+  if (now - buttonPressStartTime[i] >= BUTTON_HOLD_TIME) {
+    ButtonAction* A = actionMap[currentMode][i];
+    if (A && A->onHold) A->onHold(i);
+    encoderChanged = true;
+  }
+}
+
+// Update edge state
+buttonWasPressed[i] = buttonPressed;
   }
 
   // ==================================================================
@@ -1365,6 +1835,25 @@ void loop() {
 // HELPER FUNCTIONS - IMPLEMENTATIONS
 //========================================================================
 
+void initAssignSlotsDefaults() {
+  for (int i = 0; i < 7; ++i) assignSlots[i].degree = i;
+}
+
+ChordType determineDiatonicTriadForDegree(int8_t degree) {
+  int8_t d0 = degree % 7; if (d0 < 0) d0 += 7;
+  auto norm12 = [](int v){ int n = v % 12; return (n < 0) ? n + 12 : n; };
+  int pc0 = norm12(scalemanager.getScaleNote(d0));
+  int pc1 = norm12(scalemanager.getScaleNote((d0 + 2) % 7));
+  int pc2 = norm12(scalemanager.getScaleNote((d0 + 4) % 7));
+  int i1 = (pc1 - pc0 + 12) % 12;
+  int i2 = (pc2 - pc1 + 12) % 12;
+  if (i1 == 4 && i2 == 3) return CHORD_TRIAD;
+  if (i1 == 3 && i2 == 4) return CHORD_MINOR_TRIAD;
+  if (i1 == 3 && i2 == 3) return CHORD_DIMINISHED;
+  if (i1 == 4 && i2 == 4) return CHORD_AUGMENTED;
+  return CHORD_TRIAD;
+}
+
 // Initialize all sprite buffers with color palettes
 bool initializeSprites() {
   // Info sprite (top bar with scale info)
@@ -1376,11 +1865,11 @@ bool initializeSprites() {
   infoSprite.setPaletteColor(3, 0x39c7);   // Dark grey
   infoSprite.setPaletteColor(4, 0x7bef);   // Medium grey
   infoSprite.setPaletteColor(5, 0xd69a);   // Light grey
-  infoSprite.setPaletteColor(6, 0xf800);   // Red
-  infoSprite.setPaletteColor(7, 0x7e0);    // Green
-  infoSprite.setPaletteColor(8, 0x00ff);   // Blue
-  infoSprite.setPaletteColor(9, 0xfd20);   // Orange
-  infoSprite.setPaletteColor(10, 0x6000);  // Orange 50%
+infoSprite.setPaletteColor(6, 0xf800);   // Red
+infoSprite.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+infoSprite.setPaletteColor(8, 0x00ff);   // Blue
+infoSprite.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+infoSprite.setPaletteColor(10, 0x6000);  // Red 40%
   infoSprite.setFont(&DIN_Condensed_Bold30pt7b);
   infoSprite.fillSprite(0);
 
@@ -1393,11 +1882,11 @@ bool initializeSprites() {
   keysSprite.setPaletteColor(3, 0x39c7);
   keysSprite.setPaletteColor(4, 0x7bef);
   keysSprite.setPaletteColor(5, 0xd69a);
-  keysSprite.setPaletteColor(6, 0xf800);
-  keysSprite.setPaletteColor(7, 0x7e0);
-  keysSprite.setPaletteColor(8, 0x00ff);
-  keysSprite.setPaletteColor(9, 0xfd20);
-  keysSprite.setPaletteColor(10, 0x6000);  // Orange 50%
+keysSprite.setPaletteColor(6, 0xf800);
+keysSprite.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+keysSprite.setPaletteColor(8, 0x00ff);
+keysSprite.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+keysSprite.setPaletteColor(10, 0x6000);  // Red 40%
   keysSprite.setFont(&DIN_Condensed_Bold30pt7b);
   keysSprite.fillSprite(0);
 
@@ -1410,11 +1899,11 @@ bool initializeSprites() {
   encsSprite.setPaletteColor(3, 0x39c7);
   encsSprite.setPaletteColor(4, 0x7bef);
   encsSprite.setPaletteColor(5, 0xd69a);
-  encsSprite.setPaletteColor(6, 0xf800);
-  encsSprite.setPaletteColor(7, 0x7e0);
-  encsSprite.setPaletteColor(8, 0x00ff);
-  encsSprite.setPaletteColor(9, 0xfd20);
-  encsSprite.setPaletteColor(10, 0x6000);
+encsSprite.setPaletteColor(6, 0xf800);
+encsSprite.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+encsSprite.setPaletteColor(8, 0x00ff);
+encsSprite.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+encsSprite.setPaletteColor(10, 0x6000);  // Red 40%
   encsSprite.setFont(&DIN_Condensed_Bold30pt7b);
   encsSprite.fillSprite(0);
 
@@ -1427,11 +1916,11 @@ bool initializeSprites() {
   infoSpriteBuffer.setPaletteColor(3, 0x39c7);
   infoSpriteBuffer.setPaletteColor(4, 0x7bef);
   infoSpriteBuffer.setPaletteColor(5, 0xd69a);
-  infoSpriteBuffer.setPaletteColor(6, 0xf800);
-  infoSpriteBuffer.setPaletteColor(7, 0x7e0);
-  infoSpriteBuffer.setPaletteColor(8, 0x00ff);
-  infoSpriteBuffer.setPaletteColor(9, 0xfd20);
-  infoSpriteBuffer.setPaletteColor(10, 0x6000);
+infoSpriteBuffer.setPaletteColor(6, 0xf800);
+infoSpriteBuffer.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+infoSpriteBuffer.setPaletteColor(8, 0x00ff);
+infoSpriteBuffer.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+infoSpriteBuffer.setPaletteColor(10, 0x6000);  // Red 40%
   infoSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   infoSpriteBuffer.fillSprite(0);
 
@@ -1443,11 +1932,11 @@ bool initializeSprites() {
   keysSpriteBuffer.setPaletteColor(3, 0x39c7);
   keysSpriteBuffer.setPaletteColor(4, 0x7bef);
   keysSpriteBuffer.setPaletteColor(5, 0xd69a);
-  keysSpriteBuffer.setPaletteColor(6, 0xf800);
-  keysSpriteBuffer.setPaletteColor(7, 0x7e0);
-  keysSpriteBuffer.setPaletteColor(8, 0x00ff);
-  keysSpriteBuffer.setPaletteColor(9, 0xfd20);
-  keysSpriteBuffer.setPaletteColor(10, 0x6000);
+keysSpriteBuffer.setPaletteColor(6, 0xf800);
+keysSpriteBuffer.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+keysSpriteBuffer.setPaletteColor(8, 0x00ff);
+keysSpriteBuffer.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+keysSpriteBuffer.setPaletteColor(10, 0x6000);  // Red 40%
   keysSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   keysSpriteBuffer.fillSprite(0);
 
@@ -1459,11 +1948,11 @@ bool initializeSprites() {
   encsSpriteBuffer.setPaletteColor(3, 0x39c7);
   encsSpriteBuffer.setPaletteColor(4, 0x7bef);
   encsSpriteBuffer.setPaletteColor(5, 0xd69a);
-  encsSpriteBuffer.setPaletteColor(6, 0xf800);
-  encsSpriteBuffer.setPaletteColor(7, 0x7e0);
-  encsSpriteBuffer.setPaletteColor(8, 0x00ff);
-  encsSpriteBuffer.setPaletteColor(9, 0xfd20);
-  encsSpriteBuffer.setPaletteColor(10, 0x6000);
+encsSpriteBuffer.setPaletteColor(6, 0xf800);
+encsSpriteBuffer.setPaletteColor(7, 0xffe0);   // Yellow (replaces green)
+encsSpriteBuffer.setPaletteColor(8, 0x00ff);
+encsSpriteBuffer.setPaletteColor(9, 0xfd20);   // Orange (legacy; prefer PAL_RED_40 for short-press)
+encsSpriteBuffer.setPaletteColor(10, 0x6000);  // Red 40%
   encsSpriteBuffer.setFont(&DIN_Condensed_Bold30pt7b);
   encsSpriteBuffer.fillSprite(0);
 
@@ -1550,7 +2039,7 @@ void drawInfoArea() {
   // Roman numerals for chord degrees
   const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
   const char* noteNamesSimple[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-  const char* chordTypeNames[] = { "", "7", "m", "m7", "°", "°7", "+" };  // Match ChordType enum
+  const char* chordTypeNames[] = { "", "7", "m", "m7", "dim", "dim7", "aug" };  // Match ChordType enum
 
   if (currentChord.name.length() > 0) {
     // Get root note name
@@ -1566,24 +2055,24 @@ void drawInfoArea() {
     String chordName = String(romanNumerals[currentChordDegree]) + ": " + rootNoteName + String(chordTypeNames[static_cast<int>(currentChord.type)]) + " ";
     infoSpriteBuffer.printf("%s", chordName.c_str());
 
-    //NOTES DISPLAY DISABLED - Commented out for cleaner chord display
-    // Build and display notes string
-    String notesStr = "";
-    for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
-      int noteIndex = currentChord.notes[i] % 12;
-      notesStr += String(noteNamesSimple[noteIndex]);
-      if (i < currentChord.noteCount - 1) notesStr += "-";
-    }
+    // //NOTES DISPLAY DISABLED - Commented out for cleaner chord display
+    // // Build and display notes string
+    // String notesStr = "";
+    // for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
+    //   int noteIndex = currentChord.notes[i] % 12;
+    //   notesStr += String(noteNamesSimple[noteIndex]);
+    //   if (i < currentChord.noteCount - 1) notesStr += "-";
+    // }
+
+    // // Fixed position for notes (experiment with this value)
+    // infoSpriteBuffer.setCursor(chordAreaX + 60, 5);  // Try different X positions
+    // infoSpriteBuffer.printf("%s", notesStr.c_str());
 
     // // Display notes right-aligned within chord area
     // infoSpriteBuffer.setTextSize(0.45);
     // infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top Right
     // infoSpriteBuffer.setCursor(chordAreaX + chordAreaWidth - 3, 5);  // 3px from right edge
     // infoSpriteBuffer.printf("%s", notesStr.c_str());
-
-    // Fixed position for notes (experiment with this value)
-    infoSpriteBuffer.setCursor(chordAreaX + 60, 5);  // Try different X positions
-    infoSpriteBuffer.printf("%s", notesStr.c_str());
 
     // Display intervals
     infoSpriteBuffer.setTextSize(0.35);
@@ -1630,121 +2119,16 @@ void drawInfoArea() {
     infoSpriteBuffer.printf("%s: No chord", romanNumerals[currentChordDegree]);
   }
 
-  // // Draw chord info with Roman numerals and note names
-  // infoSpriteBuffer.setTextSize(0.45);
-  // infoSpriteBuffer.setTextDatum(TL_DATUM);
-  // infoSpriteBuffer.setCursor(chordAreaX + 5, 5);
-  // infoSpriteBuffer.setTextColor(PAL_WHITE);
-
-  // // Roman numerals for chord degrees
-  // const char* romanNumerals[] = { "I", "ii", "iii", "IV", "V", "vi", "vii°" };
-
-  // if (currentChord.name.length() > 0) {
-  //   // Display chord with Roman numeral
-  //   String chordDisplay = String(romanNumerals[currentChordDegree]) + ": " + currentChord.name;
-  //   infoSpriteBuffer.printf("%s", chordDisplay.c_str());
-
-  //   // Draw chord notes on second line
-  //   infoSpriteBuffer.setTextSize(0.35);
-  //   infoSpriteBuffer.setCursor(chordAreaX + 5, 25);
-  //   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
-
-  //   // Simple note names (avoiding function calls)
-  //   const char* noteNamesSimple[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-  //   String notesStr = "";
-  //   for (int i = 0; i < currentChord.noteCount && i < 6; i++) {
-  //     int noteIndex = currentChord.notes[i] % 12;
-  //     notesStr += String(noteNamesSimple[noteIndex]);
-  //     if (i < currentChord.noteCount - 1) notesStr += " ";
-  //   }
-  //   infoSpriteBuffer.printf("%s", notesStr.c_str());
-  // } else {
-  //   infoSpriteBuffer.printf("%s: %s", romanNumerals[currentChordDegree], "No chord");
-  // }
 }
-
-
-// // Draw the top info area showing current scale/root/formula
-// void drawInfoArea() {
-//   // Note: sprite is already cleared by caller before drawInfoArea()
-
-//   // Determine if we should flash (hide) based on mode
-//   bool hideRoot = (encoder7Mode == MODE_ROOT && !flashState);
-//   bool hideScale = (encoder7Mode == MODE_SCALE && !flashState);
-
-//   // Calculate bounding box for scale info
-//   int boxWidth = 177;  // Fixed width to properly contain all scale names
-//   int boxHeight = 53;  // Original 50 + 3px
-
-//   // Draw root note name (without octave number) - shifted 3px down and right
-//   infoSpriteBuffer.setTextSize(0.55);
-//   infoSpriteBuffer.setTextDatum(TL_DATUM);
-//   infoSpriteBuffer.setCursor(3, 3);
-//   if (hideRoot) {
-//     infoSpriteBuffer.setTextColor(PAL_MEDGREY);
-//   } else {
-//     infoSpriteBuffer.setTextColor(PAL_WHITE);
-//   }
-//   String rootName = cachedRootName;
-//   if (rootName.endsWith("-")) {
-//     rootName = rootName.substring(0, rootName.length() - 1);
-//   }
-//   infoSpriteBuffer.printf(rootName.c_str());
-
-//   // Draw scale name - shifted 3px down and right
-//   infoSpriteBuffer.setTextSize(0.4);
-//   infoSpriteBuffer.setTextDatum(TL_DATUM);
-//   infoSpriteBuffer.setCursor(30, 8);
-//   if (hideScale) {
-//     infoSpriteBuffer.setTextColor(PAL_MEDGREY);
-//   } else {
-//     infoSpriteBuffer.setTextColor(PAL_WHITE);
-//   }
-//   infoSpriteBuffer.printf(cachedScaleName.c_str());
-
-//   // Draw interval formula - shifted 3px down and right
-//   infoSpriteBuffer.setTextSize(0.35);
-//   infoSpriteBuffer.setTextDatum(TL_DATUM);
-//   infoSpriteBuffer.setCursor(4, 33);
-//   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
-//   infoSpriteBuffer.printf(intvlFormula[scaleNo]);
-
-//   // Draw rounded rectangle outline around all labels
-//   infoSpriteBuffer.setColor(PAL_WHITE);
-//   infoSpriteBuffer.drawRoundRect(0, 0, boxWidth, boxHeight, 5);
-
-//   // Serial.print("Drawing info - Root: ");
-//   // Serial.print(rootName);
-//   // Serial.print(", Scale: ");
-//   // Serial.print(cachedScaleName);
-//   // Serial.print(", Formula: ");
-//   // Serial.println(intvlFormula[scaleNo]);  // Now const char*, no .c_str() needed
-
-//   // // Add mode indicator when switch is ON
-//   // if (currentSwitchState) {
-//   //   infoSpriteBuffer.setTextSize(0.35);
-//   //   infoSpriteBuffer.setTextDatum(TR_DATUM);  // Top right
-//   //   infoSpriteBuffer.setCursor(310, 5);
-//   //   infoSpriteBuffer.setTextColor(PAL_LIGHTGREY);
-
-//   //   String modeText = "MODE: ";
-//   //   switch (encoder7Mode) {
-//   //     case MODE_SCALE: modeText += "SCALE"; break;
-//   //     case MODE_ROOT: modeText += "ROOT"; break;
-//   //     case MODE_OCTAVE: modeText += "OCTAVE"; break;
-//   //   }
-//   //   infoSpriteBuffer.printf(modeText.c_str());
-//   // }
-// }
 
 // Draw the toggle switch indicator
 void drawSwitchIndicator(bool isOn) {
-  encsSpriteBuffer.fillRect(305, 8, 10, 20, PAL_TRANSPARENT);  // Clear area
-  encsSpriteBuffer.setColor(isOn ? PAL_GREEN : PAL_DARKGREY);  // Green if on, grey if off
-  int yPos = isOn ? 8 : 18;                                    // Top position when on
-  encsSpriteBuffer.fillRect(305, yPos, 10, 10);
-  encsSpriteBuffer.setColor(PAL_LIGHTGREY);  // Light grey border
-  encsSpriteBuffer.drawRect(305, 8, 10, 20);
+encsSpriteBuffer.fillRect(305, 8, 10, 20, PAL_TRANSPARENT);  // Clear area
+encsSpriteBuffer.setColor(isOn ? PAL_YELLOW : PAL_DARKGREY);  // Yellow (palette idx 7) if on, grey if off
+int yPos = isOn ? 8 : 18;                                    // Top position when on
+encsSpriteBuffer.fillRect(305, yPos, 10, 10);
+encsSpriteBuffer.setColor(PAL_LIGHTGREY);  // Light grey border
+encsSpriteBuffer.drawRect(305, 8, 10, 20);
 }
 
 // Calculate intervals between successive scale notes
@@ -1933,13 +2317,12 @@ String getChordName(int8_t rootNote, ChordType type) {
     case CHORD_MINOR_TRIAD: return rootName + "m ";          // Minor triad
     case CHORD_SEVENTH: return rootName + "7 ";              // Major 7th
     case CHORD_MINOR_SEVENTH: return rootName + "m7 ";       // Minor 7th
-    case CHORD_DIMINISHED: return rootName + "° ";           // Diminished
-    case CHORD_DIMINISHED_SEVENTH: return rootName + "°7 ";  // Diminished 7th
-    case CHORD_AUGMENTED: return rootName + "+ ";            // Augmented
+    case CHORD_DIMINISHED: return rootName + "dim ";         // Diminished
+    case CHORD_DIMINISHED_SEVENTH: return rootName + "dim7 "; // Diminished 7th
+    case CHORD_AUGMENTED: return rootName + "aug ";          // Augmented
     default: return rootName + " ";
   }
 }
-
 
 // Generate chord based on scale degree and respect selected type
 void generateChordForDegree(int8_t degree) {
@@ -2033,89 +2416,6 @@ void generateChordForDegree(int8_t degree) {
   Serial.println();
 }
 
-
-
-// // Generate chord based on scale degree
-// void generateChordForDegree(int8_t degree) {
-//   if (degree < 0 || degree > 6) return;
-
-//   currentChord.clear();
-//   currentChordDegree = degree;
-
-//   // Get the root note from scale
-//   int8_t scaleRoot = scalemanager.getScaleNote(degree);
-//   int8_t absoluteRoot = (scaleRoot + fundamental) % 12;
-//   currentChord.rootNote = absoluteRoot;
-
-//   // Determine chord quality based on scale degree
-//   ChordType chordType;
-//   switch (degree) {
-//     case 0:  // I - Major
-//       chordType = CHORD_TRIAD;
-//       break;
-//     case 1:  // ii - Minor
-//     case 2:  // iii - Minor
-//     case 5:  // vi - Minor
-//       chordType = CHORD_MINOR_TRIAD;
-//       break;
-//     case 3:  // IV - Major
-//       chordType = CHORD_TRIAD;
-//       break;
-//     case 4:  // V - Major
-//       chordType = CHORD_TRIAD;
-//       break;
-//     case 6:  // vii° - Diminished
-//       chordType = CHORD_DIMINISHED;
-//       break;
-//     default:
-//       chordType = CHORD_TRIAD;
-//       break;
-//   }
-
-//   currentChord.type = chordType;
-//   currentChord.scaleDegree = degree;
-
-//   // Build the chord notes
-//   switch (chordType) {
-//     case CHORD_TRIAD:
-//     case CHORD_MINOR_TRIAD:
-//     case CHORD_DIMINISHED:
-//     case CHORD_AUGMENTED:
-//       currentChord.notes[0] = absoluteRoot;
-//       currentChord.notes[1] = (scalemanager.getScaleNote((degree + 2) % 7) + fundamental) % 12;
-//       currentChord.notes[2] = (scalemanager.getScaleNote((degree + 4) % 7) + fundamental) % 12;
-//       currentChord.noteCount = 3;
-//       break;
-
-//     case CHORD_SEVENTH:
-//     case CHORD_MINOR_SEVENTH:
-//     case CHORD_DIMINISHED_SEVENTH:
-//       currentChord.notes[0] = absoluteRoot;
-//       currentChord.notes[1] = (scalemanager.getScaleNote((degree + 2) % 7) + fundamental) % 12;
-//       currentChord.notes[2] = (scalemanager.getScaleNote((degree + 4) % 7) + fundamental) % 12;
-//       currentChord.notes[3] = (scalemanager.getScaleNote((degree + 6) % 7) + fundamental) % 12;
-//       currentChord.noteCount = 4;
-//       break;
-//   }
-
-//   // Generate chord name
-//   currentChord.name = getChordName(absoluteRoot, chordType);
-
-//   Serial.print("Generated chord: ");
-//   Serial.print(currentChord.name);
-//   Serial.print(" (Degree ");
-//   Serial.print(degree);
-//   Serial.print(") Notes: ");
-//   for (int i = 0; i < currentChord.noteCount; i++) {
-//     Serial.print(getNoteName(currentChord.notes[i]));
-//     Serial.print(" ");
-//   }
-//   Serial.println();
-// }
-
-
-
-
 // Initialize with I chord
 void initChordSystem() {
   generateChordForDegree(0);  // Start with I chord
@@ -2169,8 +2469,6 @@ void changeChordType(ChordType newType) {
 // call via
 //String numberIntervals = getChordIntervalsAsNumbers();
 // Returns "0,4,7" for major triad, "0,3,7" for minor triad, etc.
-
-
 // Get integer-based interval representation (semitones from root)
 String getChordIntervalsAsNumbers() {
   String intervalsStr = "";
@@ -2208,7 +2506,6 @@ String getChordIntervalsAsNumbers() {
 // call via
 //String numberIntervals = getChordIntervalsAsSteps();
 // Returns "0,4,3" for major triad, "0,3,4" for minor triad, etc.
-
 // Get intervalic representation (semitones between consecutive notes)
 String getChordIntervalsAsSteps() {
   String stepsStr = "";

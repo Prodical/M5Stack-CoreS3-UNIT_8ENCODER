@@ -107,6 +107,15 @@ State of Play - 2025-12-07 03:23 UTC
 
 === TECHNICAL NOTES ===
 
+-- 2025-12-09 05:13 UTC update --
+- Palette: GREEN->YELLOW; short press ORANGE->PAL_RED_40; consistent LED and sprite palettes
+- Renamed PAL_GREEN->PAL_YELLOW, VIS_SHORT_ORANGE->VIS_SHORT_RED40, VIS_LATCH_GREEN->VIS_LATCH_YELLOW
+- Added CHORD_ASSIGN submode (E7 long-press): E0–E6 degree slots; Roman numerals centered (light grey)
+- Degree/Type rotations retrigger chord when chordPlaying (pressed or latched)
+- NORMAL chord mapping: E0/E1 press trigger/latch chord; E6 press disabled (still velocity source)
+- Panic moved to touch-anywhere; clears all latches/LEDs and dims chord keys to RED_40
+- Fixed stray brace causing scope errors in button handler; hold logic for E7 made robust
+
 - BLE MIDI library conflict resolved by removing ArduinoBLE
 - ESP32 native BLE library handles BLEMIDI_Transport
 - Velocity bar base Y calculated within keys sprite coordinates (320x150)
@@ -115,9 +124,9 @@ State of Play - 2025-12-07 03:23 UTC
 
 === BUILD STATUS ===
 
-- Compiling successfully
-- All features tested and working
-- Ready for feature integration
+- Compiling status: fixing recent merge edits; current branch stabilizing
+- Most recent compile issue (stray brace) resolved
+- Ready for further feature integration
 
 === DEVELOPMENT ROADMAP ===
 
